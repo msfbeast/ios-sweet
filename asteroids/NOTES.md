@@ -86,3 +86,26 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
   - console mirrored into ramoops 0x81f20000 for `oem dmesg`;
   - UFS host at 0x1d84000 already enabled;
   - Gunyah, PSCI 1.1.
+
+## 2026-10-20: M2 groundwork: payload in the shim image, 3a ADT, patch 0100, CI
+
+- **Loader:** ABL ignores boot.img's ramdisk, so `shim/build.sh PAYLOAD` appends the SWEETXNU payload at `_end` (16-aligned) and grows the Image header's `image_size` to cover it. `loader_find()` checks the magic there. With a payload, `shim_main` prints CPU/FDT and calls `loader_boot()` (sweet's loader with the live splash base, 1080x2392). Without one it runs the probe. Dummy-payload test: magic lands at exactly the aligned `_end`.
+- **ADT:** `tools/mkadt.py` (copy of upstream's, uses upstream `tools/adt.py`):
+  - dram 0x8_c0000000 + 4 GiB;
+  - GICD 0x17100000 / GICR 0x17180000 size 0x200000, `virtual-timer-intid` 27;
+  - `sweet-fbcon` 0xe3940000 1080x2392 stride 4320;
+  - `sweet-ufs` 0x1d84000;
+  - informational `asteroids-ramoops` node and `redistributor-stride`;
+  - root compatible adds `nothing,asteroids` + `qcom,sm7635` and keeps `xiaomi,sweet`, `qcom,kryo470` and `sweet,display` so the drivers match.
+  
+  `/product` is missing until the D22AP device tree is extracted from the iPhone X IPSW.
+- **Patch inventory** (subagent over all 81 upstream patches): Tier A (early console) needs the framebuffer PA, height, two-block mapping and alias offset; Tier B (fbcon) and the GIC addresses are ADT-driven already; `GICR_PE_SIZE` is hardcoded. Keys, touch and USB start by default and poke sweet MMIO: boot with `sweetkeys=0 sweettouch=0 sweetusb=0`. The persistent log writes the last 4 MiB of `ufsroot=` (default userdata) when `ufsrw=1`, so M2 boots must not set `ufsrw`/`rootrw`/`rd=ufsroot0`.
+- **`asteroids/xnu-patches/0100-asteroids-board.patch`** (made against upstream CI's `xnu-buildtree` of `fdad0de`, `git apply --check` clean):
+  - `SWEET.h`: `SWEET_ASTEROIDS`, `SWEET_EARLY_FB_*` (PA 0xe3940000, 1080x2392, stride 4320, 2 x 32 MiB blocks from 0xe2000000), default vtimer 27, `GICR_PE_SIZE 0x40000`;
+  - `start.s`: stage-0 band from the macros; V=P framebuffer mapping loops over 2 blocks (x9 = block size, x14 = count; both set before use in `common_start`);
+  - `sweet_early.c`: geometry from the macros; relocated pointer = alias + (PA - block PA);
+  - `arm_vm_init.c`: kernel-VA alias fills 2 L2 slots.
+  
+  **Not changed: `pe_fiq.c`'s 64-bit `GICR_TYPER` read.** Probe runs 2 and 3 made that exact 64-bit read under Gunyah without an abort.
+- **CI:** `.github/workflows/xnu-asteroids.yml` = upstream workflow + `asteroids/xnu-patches/*.patch` + a step that fails unless patch 0100 is visible in the built tree (`build.sh` only warns when a patch doesn't apply). Artifacts `xnu-kernel-asteroids`, `xnu-buildtree-asteroids` (the file inside is still `kernel.development.sweet`).
+- **ABL kernel-size cap:** ABL has "Kernel size is over the limit" and "BootImage: Size is greater than max download size" (768 MiB). The first limit's value is unknown, so test a large image before the first XNU boot.

@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "fdt.h"
+#include "loader.h"
 
 #define GICD_BASE		0x17100000UL
 #define GICR_BASE		0x17180000UL
@@ -533,6 +534,17 @@ void shim_main(uint64_t dtb)
 	con_str("PHONE3A", "M1 probe, read-only");
 	show_cpu();
 	show_fdt(dtb);
+
+	/* M2: an xnu payload appended to this image means boot it (MMU stays off). */
+	uintptr_t payload = loader_find();
+	if (payload) {
+		stage = "loader";
+		con_skip();
+		con_hex("PAYLOAD", payload);
+		con_str("LOADER", loader_boot(payload, (uintptr_t)con_fb));
+		park();
+	}
+
 	show_initrd(dtb);
 	con_skip();
 
