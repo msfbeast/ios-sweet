@@ -18,6 +18,10 @@ boot_a boot_b init_boot_a init_boot_b vendor_boot_a vendor_boot_b
 dtbo_a dtbo_b vbmeta_a vbmeta_b vbmeta_system_a vbmeta_system_b
 vbmeta_vendor_a vbmeta_vendor_b recovery_a recovery_b"
 
+# The USB phone only (an emulator may be running too), unless ANDROID_SERIAL picks one.
+if [ -n "${ANDROID_SERIAL:-}" ]; then ADB=(adb); else ADB=(adb -d); fi
+adb() { command "${ADB[@]}" "$@"; }
+
 adb get-state >/dev/null
 [ "$(adb shell id -u | tr -d '\r')" = 0 ] || { echo "adb is not root: boot OrangeFox first" >&2; exit 1; }
 adb shell ls -l /dev/block/by-name/ > "$OUT/by-name.txt"
