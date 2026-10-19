@@ -76,7 +76,7 @@ fastboot oem dmesg 2>&1 | tee asteroids/backup/oem-dmesg.txt
 
 ## M1.2: Boot the probe shim
 
-Build it (already built at `asteroids/shim/out/asteroids-probe-boot.img`, SHA-256 `114da9b1...e585`):
+Build it (already built at `asteroids/shim/out/asteroids-probe-boot.img`, SHA-256 `72cc8b7f...ce358`):
 ```bash
 asteroids/shim/build.sh
 ```
@@ -98,7 +98,15 @@ What you should see: a **teal** screen with yellow labels and white values, endi
 **Film or photograph the whole screen sharply**, then leave it:
 - Force restart: hold **Power + Volume Down** until the screen goes off, and keep holding Volume Down to land in the bootloader. I haven't confirmed the 3a's exact combo: if nothing happens after 20 s, hold Power alone for 20 s.
 
-Send me: the photo or video, and whether the screen stayed teal or turned blue.
+Once it's back in fastboot, pull the probe's own text log. **Risk: none.** The probe writes every line into the ramoops zone that ABL prints:
+```bash
+fastboot oem dmesg 2>&1 | tee asteroids/backup/oem-dmesg-probe.txt
+```
+If RAM survived the forced restart, this shows the probe's lines instead of Android's log. Either answer is useful.
+
+`oem dmesg` ends with "Memory dump complete." but ABL never sends the final OKAY, so `fastboot` keeps waiting. Press **Ctrl+C** once that line appears: the file is already complete, and the next fastboot command needs the USB connection free.
+
+Send me: the photo or video, whether the screen stayed teal or turned blue, and tell me when the `oem dmesg` file is saved.
 
 What I'm reading from it:
 

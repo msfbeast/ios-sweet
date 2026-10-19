@@ -34,3 +34,55 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
 - **Slot a = stock V3.1 byte for byte** (`boot`, `init_boot`, `vendor_boot`, `dtbo`, all three `vbmeta`; only zero padding past the image end). So the Nothing Archive V3.1 images are this phone's images.
 - **Slot b = factory build `2502172235`** (vbmeta `init_boot` fingerprint `.../UKQ1.241011.001/2502172235`, patch 2024-11-05), marked unbootable after the first OTA to slot a (`2503021856`).
 - **Tool fix:** `backup-partitions.sh` now uses `adb -d` unless `ANDROID_SERIAL` is set. With the Android emulator running, plain `adb` stopped with "more than one device/emulator".
+
+## 2026-10-19: M1.1 `fastboot boot` works; `oem dmesg` is a log channel
+
+- **`fastboot boot` of stock V3.1 `boot.img`:** sent 96 MiB, `Booting OKAY` after 10.4 s, Android up with kernel `6.1.84-android14-11-gf4b0d69fdf34`, slot `_a`, `sys.boot_completed=1` at 23 s uptime. **Temporary boot of a v4 image works on this ABL.**
+- **`fastboot oem dmesg`** (after `adb reboot bootloader`, a warm reset) returned 300 KB: the full kernel log of that boot. It starts with `DBGC`, Linux pstore's `PERSISTENT_RAM_SIG`, so ABL dumps the **ramoops console zone at 0x81f20000** raw (header u32 sig, start, size, then text). ABL loses a few bytes at each 64-byte INFO chunk boundary. `tools/oem-dmesg.py` joins the chunks; raw and clean copies are in `asteroids/backup/oem-dmesg*.txt` (git-ignored).
+- **Facts from that log:**
+  - RAM: low bank 0x80e00000..0xffffffff in 9 pieces. **High bank 0x8_80000000..0x9_ffffffff** with holes; largest run 0x8_bf800000..0x9_ffffefff. Total 7,839,672 KiB.
+  - CPU0-3 `MIDR 0x410fd801` (A520), CPU4-7 `0x410fd811` (A720). PAC with QARMA3. A520 and A720 differ in ID_AA64MMFR1.
+  - PSCI 1.1, SMCCC 1.3, OSI mode. Gunyah carve-out 0x80000000..0x80dfffff. `kvm-arm.mode=protected` on the command line.
+  - GICv3: 988 SPIs, 16 PPIs, DirectLPI, CPU1's redistributor at 0x171c0000 (**stride 0x40000 confirmed**), ITS at 0x17140000. Arch timer 19.2 MHz, virtual.
+  - Linux warns "Kernel image misaligned at boot": ABL doesn't place the image at a 2 MiB boundary. The shim is position independent, so this doesn't affect it.
+- **Probe update:** the console now mirrors every line into the ramoops zone in pstore format (`con_log_init`), so after the probe a warm reset plus `oem dmesg` returns its text. That also answers whether RAM survives Power + Vol-. Host-tested the writer. New image SHA-256 `91c807250588683445ddeddb6c471de2cf1f48a60d922ad10cc9d508585dbc4d`.
+
+## 2026-10-19: M1.2 probe run 1: our code runs; GICD read aborts under Gunyah
+
+- **Image** `91c80725...dbc4d` via `fastboot boot`: `Sending 88 KB OKAY`, `Booting OKAY` (10.5 s). Evidence: Sajid's photo of the blue panic screen.
+- **Result:** ABL ran the shim, the framebuffer at 0xe3940000 works (full-screen blue panic drawn by our handler), and the stages before the GIC ran: CPU regs, FDT, initrd, PSCI, CPU_ON x7. Panic: `SYNC`, slot 4 (current EL, SPx), cpu 0, stage `gic dist`, **ESR 0x96000010** (EC 0x25 data abort at EL1, ISV 0, DFSC 0x10 *synchronous external abort*), **FAR 0x17100000** (GICD_CTLR, the first distributor read), ELR 0xA80021CC (ABL loaded the image near 0xA8000000), SPSR 0x820003C5.
+- **Reading:** Linux in the Android VM reads the same GICD (988 SPIs), so Gunyah emulates or passes it for Linux but returned an external abort to our access. Open causes: Gunyah's vGIC state after our PSCI CPU_ON/CPU_OFF of the 7 secondaries (they ran first in run 1), or something about how ABL hands over a non-Linux image.
+- **ramoops check failed to test:** the panic screen cleared the earlier lines, and the following `oem dmesg` returned a *new Android* log (process IDs differ from the first dump). Android booted after the forced restart and pstore reset the zone, so whether RAM survives the forced restart is still unknown.
+- **Probe v2** (`d6dddbcb2b2c7118078ef07125e8ce17787077bf59c72cb6592ab12b20b71398`):
+  - GIC and UFS accesses go through `mmio_rd32/rd64/wr32`: a data abort on the boot CPU while `probing` is set records ESR and skips the instruction.
+  - Order is now FDT, SMCCC vendor-hypervisor UID, GIC (ICC regs, GICD CTLR/TYPER/PIDR2, every GICR frame's TYPER, then the timer and SGI tests if the own frame is reachable), UFS, and PSCI SMP last.
+  - The panic screen keeps the earlier lines.
+
+## 2026-10-19: M1.2 probe run 2: memory map, Gunyah, GIC rules, and a working log
+
+- **Image** `d6dddbcb...71398`. Screen photo, plus the same text read back with `fastboot oem dmesg` (`backup/oem-dmesg-probe2*.txt`).
+- **CPU:** EL1, boot core A520 (`MIDR 0x410fd801`), `MPIDR 0x81000000` (MT=1, core in Aff1), CNTFRQ 19.2 MHz, **ID_AA64MMFR0 TGran16 = 1 (16K pages supported)**, PARange 2 (40-bit), PFR0 GIC=3, EL2=1.
+- **Live FDT:** DTB at 0xb738f000. `/memory` (first 8 entries, 4K pages): 0x80e00000+0xa00, 0x81cf5000+0xa, 0x81f20000+0x580, 0xeea00000+0x11600, 0x8_80000000+0x2fb00, 0x8_b0000000+0x9700, 0x9_00000000+0x100000, 0x8_bf800000+0x40800. So **0x8_bf800000..0xa_00000000 is contiguous (5 GiB)**. Splash 0xe3940000 / 0x2b00000. Panel **`rm69220_fhd_plus_120hz_vid_vxn`** (Visionox).
+- **Initrd** 0xb7590000..0xb7fff4a8 = 10,941,608 bytes = vendor ramdisk 8,822,676 + **`init_boot` ramdisk 2,113,583** + 5,349 (bootconfig). Our marker is absent: **ABL ignores boot.img's ramdisk when `init_boot` exists.** The XNU payload must ride inside the kernel image instead (append after the shim, find it via `_end`).
+- **Hypervisor:** SMCCC vendor-hyp UID w0 = `0xcd8fd5c1`, the first word of Gunyah's UUID `c1d58fcd-a453-5fdb-9265-ce36673d5f14`. **Gunyah confirmed.** PSCI 1.1, SMCCC 1.3.
+- **GIC:** ICC_SRE=1, ICC_CTLR 0x88400. **GICD reads work this time** (CTLR 0xd0, TYPER 0x016b001f = 1024 lines, PIDR2 0x30 = GICv3). GICR frame 0 at 0x17180000 has affinity 0 (CPU0), WAKER 0. Then a **synchronous external abort at 0x17190400 (`GICR_IPRIORITYR`)** on the probe's *byte* writes, while the 32-bit `IGROUPR0` write just before worked. **Rule: under Gunyah, touch the GIC with 32-bit accesses only.** Sweet's XNU GIC code already writes priorities as 32-bit words.
+- **Run 1 vs run 2:** the only order difference before the GICD access was PSCI CPU_ON/CPU_OFF of the 7 secondaries (run 1). Hypothesis: after a vCPU is powered off, Gunyah refuses distributor access from the remaining vCPU. Run 3 re-reads GICD after the SMP test.
+- **Log channel proven:** RAM survived Power + Vol- straight to fastboot, and `oem dmesg` printed the probe's lines from 0x81f20000. ABL ignores the pstore size field (old Android text followed ours) and lost the first ~50 bytes, so the probe now clears 64 KiB and writes 4 padding lines first.
+- **Probe v3** `72cc8b7f09c438d8d1206d8ea011cc7b0e6511d9c5ce1774b013b1b14cace358`: 32-bit priority and enable writes (guarded), GICD re-read after SMP, cleaner log.
+
+## 2026-10-19: M1 done: probe run 3 completes on the Phone (3a)
+
+- **Image** `72cc8b7f...ce358`, read back in full with `fastboot oem dmesg` after Power + Vol- (`backup/oem-dmesg-probe3*.txt`). The padding worked: ABL dropped part of the first lines only.
+- **GIC under Gunyah, 32-bit accesses only:** priorities + ISENABLER0 written as words without aborts. **Virtual timer INTID 27: 30 IRQs in 300 ms (0x1e)**, pending bit 27 seen before unmasking, last INTID 0x1b. **SGI 1: 10 of 10.** Group 1 IRQs through ICC_IAR1/EOIR1 work.
+- **UFS host (read only):** VER 0x300 (UFSHCI 3.0), CAP 0x1587031f, HCS 0x10f (device present, UTRL/UTMRL ready, UIC ready), HCE 1. **ABL leaves the UFS host enabled**, as sweet's driver expects.
+- **PSCI:** FEATURES(CPU_ON) = 0, FEATURES(SYSTEM_RESET2) = 0 (both supported). **All 7 secondaries came up and turned off:** CPU1-3 MPIDR 0x81000100..300 MIDR 0x410fd801 (A520), CPU4-7 0x81000400..700 MIDR 0x410fd811 (A720).
+- **GICD after SMP:** CTLR 0xd3 (our Group 1 enable), TYPER unchanged. So CPU_ON/CPU_OFF did *not* break distributor access. **Run 1's GICD abort stays unexplained** (same 32-bit read of 0x17100000). Treat GICD access as possibly flaky under Gunyah: XNU's GIC code should survive or retry an external abort there, and the first XNU boots should log every GICD access.
+- **M1 is complete.** Inputs for M2 (ADT + XNU early console):
+  - phys window inside 0x8_c0000000..0x9_c0000000;
+  - GICD 0x17100000 / GICR 0x17180000, stride 0x40000, 32-bit access only;
+  - vtimer INTID 27;
+  - payload appended to the shim image, because ABL ignores boot.img's ramdisk;
+  - framebuffer 0xe3940000 1080x2392 stride 4320;
+  - console mirrored into ramoops 0x81f20000 for `oem dmesg`;
+  - UFS host at 0x1d84000 already enabled;
+  - Gunyah, PSCI 1.1.

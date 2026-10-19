@@ -9,7 +9,9 @@
  *     INTID 27 and SGI 1 delivered as Group 1 IRQs
  *   - UFS host controller version (read only), last because a dead clock
  *     would hang the bus
- * Nothing is written to storage or PMIC. The screen stays up until
+ * Nothing is written to storage or PMIC. Every line also goes to the
+ * ramoops console zone, so after a warm reset `fastboot oem dmesg` shows it
+ * (and tells us whether RAM survives the reset). The screen stays up until
  * Power + Volume Down. Any unexpected exception on the boot CPU paints a
  * blue panic screen; a secondary's fault is recorded and that core parks.
  */
@@ -48,6 +50,7 @@
 #define PSCI_FEATURES		0x8400000aUL
 #define PSCI_SYSTEM_RESET2	0xc4000012UL
 #define SMCCC_VERSION		0x80000000UL
+#define VENDOR_HYP_UID		0x8600ff01UL	/* SMCCC: owner 6, function 0xff01 */
 
 #define NR_CPUS			8
 #define PROBE_MAGIC		0x424f525033545341ULL	/* "AST3PROB" little-endian */
@@ -59,7 +62,6 @@
 static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
 static inline uint64_t rd64(uintptr_t a) { return *(volatile uint64_t *)a; }
 static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
-static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 
 extern char secondary_entry[];
 
@@ -68,6 +70,61 @@ static uint64_t boot_mpidr;
 static volatile uint64_t sec_mpidr[NR_CPUS], sec_midr[NR_CPUS], sec_fault[NR_CPUS];
 static volatile uint32_t irq_count, irq_other, irq_last;
 static volatile int irq_src;
+
+/*
+ * Reads and writes that may abort (run 1: GICD at 0x17100000 gave a
+ * synchronous external abort under Gunyah). While `probing` is set, a data
+ * abort on the boot CPU skips the instruction and leaves its ESR here.
+ */
+static volatile int probing;
+static volatile uint64_t probe_esr;
+
+static uint64_t mmio_rd32(uintptr_t a, uint32_t *v)
+{
+	probe_esr = 0;
+	probing = 1;
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+	uint32_t x = rd32(a);
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+	probing = 0;
+	*v = probe_esr ? 0xdeadbeef : x;
+	return probe_esr;
+}
+
+static uint64_t mmio_rd64(uintptr_t a, uint64_t *v)
+{
+	probe_esr = 0;
+	probing = 1;
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+	uint64_t x = rd64(a);
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+	probing = 0;
+	*v = probe_esr ? 0xdeadbeefdeadbeefULL : x;
+	return probe_esr;
+}
+
+static uint64_t mmio_wr32(uintptr_t a, uint32_t v)
+{
+	probe_esr = 0;
+	probing = 1;
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+	wr32(a, v);
+	__asm__ volatile("dsb sy; isb" ::: "memory");
+	probing = 0;
+	return probe_esr;
+}
+
+/* One labelled register read: "LABEL name=value" or "LABEL name ABORT esr". */
+static uint32_t show_rd32(const char *label, const char *name, uintptr_t a)
+{
+	uint32_t v;
+	uint64_t esr = mmio_rd32(a, &v);
+	if (esr)
+		con_hex2(label, "ABORT esr=", (uint32_t)esr, "at=", (uint32_t)a);
+	else
+		con_hex2(label, name, v, "at=", (uint32_t)a);
+	return v;
+}
 
 static uint64_t smc(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
 {
@@ -140,13 +197,17 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 		irq_handler();
 		return;
 	}
+	if (slot == 4 && probing && me == boot_mpidr && (rsr("esr_el1") >> 26) == 0x25) {
+		probe_esr = rsr("esr_el1");	/* data abort in mmio_*: skip the access */
+		wsr("elr_el1", rsr("elr_el1") + 4);
+		return;
+	}
 	if (me != boot_mpidr) {
 		unsigned idx = (me >> 8) & 7;
 		sec_fault[idx] = rsr("esr_el1") | (1ULL << 63);
 		park();
 	}
-	con_clear(BLUE);
-	con_skip();
+	/* Keep the lines above: the panic goes below them. */
 	con_skip();
 	switch (slot & 3) {
 	case 0: con_str("PANIC", "SYNC"); break;
@@ -301,21 +362,6 @@ static void test_smp(void)
 
 /* ---- GIC + timer ---- */
 
-static uintptr_t find_gicr(void)
-{
-	uint64_t aff = rsr("mpidr_el1");
-	uint32_t want = (aff & 0xffffff) | ((aff >> 8) & 0xff000000);
-
-	for (uintptr_t off = 0; off < GICR_SIZE; off += GICR_PE_SIZE) {
-		uint64_t typer = rd64(GICR_BASE + off + GICR_TYPER);
-		if ((uint32_t)(typer >> 32) == want)
-			return GICR_BASE + off;
-		if (typer & (1 << 4))	/* Last */
-			break;
-	}
-	return 0;
-}
-
 static void gicd_wait_rwp(void)
 {
 	for (int i = 0; i < 1000000 && (rd32(GICD_BASE) & (1U << 31)); i++)
@@ -370,38 +416,80 @@ static void test_gic(void)
 		wsr("icc_sre_el1", sre | 1);
 		isb();
 	}
+	con_hex2("ICC", "sre=", rsr("icc_sre_el1"), "ctlr=", rsr("icc_ctlr_el1"));
 	if (!(rsr("icc_sre_el1") & 1)) {
 		con_str("GIC", "no sysreg iface, skip");
 		return;
 	}
 
+	/* Distributor: run 1 aborted on the first read here. */
 	stage = "gic dist";
-	uint32_t dctlr = rd32(GICD_BASE);
-	con_hex2("GICD", "typer=", rd32(GICD_BASE + GICD_TYPER), "iidr=", rd32(GICD_BASE + GICD_IIDR));
-	con_hex2(" ", "pidr2=", rd32(GICD_BASE + GICD_PIDR2), "ctlr=", dctlr);
-	/* Non-secure view (DS=0): bit0 EnableGrp1, bit1 EnableGrp1A, bit4 ARE_NS; Linux writes 0x13 */
-	wr32(GICD_BASE, dctlr | 0x13);
-	gicd_wait_rwp();
+	uint64_t desr;
+	uint32_t dctlr;
+	desr = mmio_rd32(GICD_BASE, &dctlr);
+	if (desr)
+		con_hex2("GICD", "ABORT esr=", (uint32_t)desr, "at=", (uint32_t)GICD_BASE);
+	else
+		con_hex("GICD ctlr", dctlr);
+	show_rd32("GICD", "typer=", GICD_BASE + GICD_TYPER);
+	show_rd32("GICD", "pidr2=", GICD_BASE + GICD_PIDR2);
 
+	/* Redistributors: walk every frame at stride 0x40000 and show TYPER. */
 	stage = "gic redist";
-	uintptr_t r = find_gicr();
+	uint64_t aff = rsr("mpidr_el1");
+	uint32_t want = (aff & 0xffffff) | ((aff >> 8) & 0xff000000);
+	uintptr_t r = 0;
+	for (uintptr_t off = 0; off < GICR_SIZE; off += GICR_PE_SIZE) {
+		uint64_t typer;
+		uint64_t esr = mmio_rd64(GICR_BASE + off + GICR_TYPER, &typer);
+		if (esr) {
+			con_hex2("GICR", "ABORT esr=", (uint32_t)esr, "off=", (uint32_t)off);
+			break;
+		}
+		if (off == 0)
+			con_hex2("GICR0", "typer=", (uint32_t)typer, "aff=", (uint32_t)(typer >> 32));
+		if ((uint32_t)(typer >> 32) == want)
+			r = GICR_BASE + off;
+		if (typer & (1 << 4))	/* Last */
+			break;
+	}
 	if (!r) {
-		con_str("GICR", "not found at stride 0x40000");
+		con_str("GICR", "own frame not found");
 		return;
 	}
-	uint32_t waker = rd32(r + GICR_WAKER);
+	uint32_t waker;
+	if (mmio_rd32(r + GICR_WAKER, &waker)) {
+		con_str("GICR", "waker read aborted");
+		return;
+	}
 	if (waker & 2) {
-		wr32(r + GICR_WAKER, waker & ~2U);
+		mmio_wr32(r + GICR_WAKER, waker & ~2U);
 		for (int i = 0; i < 100000 && (rd32(r + GICR_WAKER) & 4); i++)
 			;
 	}
 	con_hex2("GICR", "base=", r, "waker=", rd32(r + GICR_WAKER));
 
+	/* Group 1 enable in the distributor only if it can be reached. */
+	if (!desr) {
+		mmio_wr32(GICD_BASE, dctlr | 0x13);
+		gicd_wait_rwp();
+	}
+
 	stage = "gic config";
-	wr32(r + GICR_IGROUPR0, 0xffffffff);	/* NS view: secure bits are WI */
-	for (int id = 0; id < 32; id++)
-		wr8(r + GICR_IPRIORITYR + id, 0xa0);
-	wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << SGI_INTID));
+	if (mmio_wr32(r + GICR_IGROUPR0, 0xffffffff)) {	/* NS view: secure bits are WI */
+		con_str("GICR", "sgi frame write aborted");
+		return;
+	}
+	/* 32-bit only: Gunyah aborted the byte writes here in run 2. */
+	for (int id = 0; id < 32; id += 4)
+		if (mmio_wr32(r + GICR_IPRIORITYR + id, 0xa0a0a0a0)) {
+			con_hex2("GICR", "prio write ABORT", 0, "off=", (uint32_t)id);
+			return;
+		}
+	if (mmio_wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << SGI_INTID))) {
+		con_str("GICR", "isenabler write aborted");
+		return;
+	}
 	wsr("icc_ctlr_el1", rsr("icc_ctlr_el1") & ~2ULL);	/* EOImode 0 */
 	wsr("icc_pmr_el1", 0xf0);
 	wsr("icc_bpr1_el1", 0);
@@ -419,8 +507,10 @@ static void test_gic(void)
 static void test_ufs(void)
 {
 	stage = "ufs read";
-	con_hex2("UFS", "ver=", rd32(UFS_BASE + UFS_VER), "cap=", rd32(UFS_BASE + UFS_CAP));
-	con_hex2(" ", "hcs=", rd32(UFS_BASE + UFS_HCS), "hce=", rd32(UFS_BASE + UFS_HCE));
+	show_rd32("UFS", "ver=", UFS_BASE + UFS_VER);
+	show_rd32("UFS", "cap=", UFS_BASE + UFS_CAP);
+	show_rd32("UFS", "hcs=", UFS_BASE + UFS_HCS);
+	show_rd32("UFS", "hce=", UFS_BASE + UFS_HCE);
 }
 
 /* ---- main ---- */
@@ -436,26 +526,40 @@ void shim_main(uint64_t dtb)
 		con_fb = (volatile uint32_t *)(uintptr_t)fdt_be64(v);
 
 	stage = "start";
+	con_log_init();
 	con_clear(TEAL);
 	con_skip();	/* rows 0-1 sit under the punch hole and rounded corners */
 	con_skip();
-	con_str("ASTEROID", "M1 probe, read-only");
+	con_str("PHONE3A", "M1 probe, read-only");
 	show_cpu();
 	show_fdt(dtb);
 	show_initrd(dtb);
 	con_skip();
 
-	stage = "psci";
+	stage = "smccc";
 	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
-	con_hex2(" feat", "on=", smc(PSCI_FEATURES, PSCI_CPU_ON, 0, 0),
-		 "rst2=", smc(PSCI_FEATURES, PSCI_SYSTEM_RESET2, 0, 0));
-	test_smp();
+	/* SMCCC "vendor specific hypervisor service call UID": names Gunyah (or not). */
+	uint64_t uid0 = smc(VENDOR_HYP_UID, 0, 0, 0);
+	con_hex("HYP UID", uid0);
 	con_skip();
 	test_gic();
+	con_skip();
 	test_ufs();
 	con_skip();
 
+	/* Last: run 1 started all cores before the GIC abort, so keep it apart. */
+	stage = "psci";
+	con_hex2(" feat", "on=", smc(PSCI_FEATURES, PSCI_CPU_ON, 0, 0),
+		 "rst2=", smc(PSCI_FEATURES, PSCI_SYSTEM_RESET2, 0, 0));
+	test_smp();
+
+	/* Run 1 aborted on GICD after CPU_ON/CPU_OFF; run 2 read it fine before. */
+	stage = "gicd after smp";
+	show_rd32("GICD2", "ctlr=", GICD_BASE);
+	show_rd32("GICD2", "typer=", GICD_BASE + GICD_TYPER);
+	con_skip();
+
 	stage = "done";
-	con_str("DONE", "film this, then Power + Vol-");
+	con_str("DONE", "film, Power+Vol-, fastboot oem dmesg");
 	park();
 }

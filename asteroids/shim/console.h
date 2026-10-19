@@ -20,6 +20,8 @@
 
 extern volatile uint32_t *con_fb;
 
+/* Also keep every line in the ramoops console zone for `fastboot oem dmesg`. */
+void con_log_init(void);
 void con_clear(uint32_t bg);
 void con_skip(void);
 void con_str(const char *label, const char *s);

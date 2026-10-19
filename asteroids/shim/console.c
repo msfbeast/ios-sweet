@@ -47,10 +47,74 @@ static void put_char(int col, char ch, uint32_t fg)
 		}
 }
 
+/*
+ * Every console line is also kept as text in the ramoops console zone
+ * (0x81f20000, Linux pstore layout: u32 sig "DBGC", u32 start, u32 size,
+ * then the text). After a warm reset ABL prints that zone with
+ * `fastboot oem dmesg`. Byte stores only: the MMU is off.
+ */
+#ifndef LOG_ZONE	/* host_test.c points it at a buffer */
+#define LOG_ZONE	0x81f20000UL
+#endif
+#define LOG_SIG		0x43474244U	/* "DBGC", PERSISTENT_RAM_SIG */
+#define LOG_CAP		(0x200000U - 12)
+
+static int log_on;
+static uint32_t log_len;
+static int log_col;
+
+static void log_putc(char c)
+{
+	if (!log_on || log_len >= LOG_CAP)
+		return;
+	*(volatile char *)(LOG_ZONE + 12 + log_len++) = c;
+	log_col = c == '\n' ? 0 : log_col + 1;
+}
+
+/* Publish the length so far; done once per line, not per byte. */
+static void log_newline(void)
+{
+	log_putc('\n');
+	if (!log_on)
+		return;
+	*(volatile uint32_t *)(LOG_ZONE + 4) = log_len;	/* start: next write offset */
+	*(volatile uint32_t *)(LOG_ZONE + 8) = log_len;	/* size: bytes valid */
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/*
+ * ABL's `oem dmesg` ignores the size field and prints the whole zone, and
+ * it lost about the first 50 bytes in run 2. So clear the first 64 KiB
+ * (old Android text would follow ours) and start with a sacrificial line.
+ */
+#define LOG_CLEAR	0x10000U
+
+void con_log_init(void)
+{
+	for (uint32_t i = 0; i < LOG_CLEAR; i += 4)	/* data starts at +12: 4-aligned only */
+		*(volatile uint32_t *)(LOG_ZONE + 12 + i) = 0;
+	*(volatile uint32_t *)(LOG_ZONE + 0) = LOG_SIG;
+	*(volatile uint32_t *)(LOG_ZONE + 4) = 0;
+	*(volatile uint32_t *)(LOG_ZONE + 8) = 0;
+	log_len = 0;
+	log_col = 0;
+	log_on = 1;
+	for (int i = 0; i < 4; i++) {
+		static const char pad[] = "........ oem dmesg drops the start of the zone ........";
+		for (const char *p = pad; *p; p++)
+			log_putc(*p);
+		log_newline();
+	}
+}
+
 static int put_str(int col, const char *s, uint32_t fg)
 {
-	while (*s)
+	while (log_col < col)
+		log_putc(' ');
+	while (*s) {
+		log_putc(*s);
 		put_char(col++, *s++, fg);
+	}
 	return col;
 }
 
@@ -64,6 +128,7 @@ static void fmt_hex(char *buf, uint64_t v, int digits)
 
 void con_skip(void)
 {
+	log_newline();
 	row++;
 }
 
@@ -71,6 +136,7 @@ void con_str(const char *label, const char *s)
 {
 	put_str(0, label, YELLOW);
 	put_str(LABEL_COLS, s, WHITE);
+	log_newline();
 	row++;
 }
 
@@ -94,5 +160,6 @@ void con_hex2(const char *label, const char *a, uint32_t va, const char *b, uint
 		fmt_hex(buf, vb, 8);
 		put_str(col, buf, WHITE);
 	}
+	log_newline();
 	row++;
 }
