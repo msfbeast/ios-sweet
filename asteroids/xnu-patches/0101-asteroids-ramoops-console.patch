@@ -1,0 +1,238 @@
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 241dd4a..0bb4743 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -699,6 +699,15 @@ Lsweet_fb_block:
+ 	add		x10, x10, x9
+ 	subs	x14, x14, #1
+ 	b.ne	Lsweet_fb_block
++#if defined(SWEET_EARLY_LOG_PA)
++	/* ramoops console zone (oem dmesg): one Device block, never Normal. */
++	MOV64	x10, SWEET_EARLY_LOG_BLOCK_PA
++	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_DISABLE) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
++	orr		x11, x11, x10
++	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
++	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
++	str		x11, [x13, x12, lsl #TTE_SHIFT]
++#endif
+ #endif
+ 
+ 	/* Ensure TTEs are visible */
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 5adc72e..44c1e33 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -10,6 +10,9 @@
+ #if defined(SWEET)
+ #include <stdint.h>
+ #include <kern/misc_protos.h>
++#if defined(SWEET_EARLY_LOG_PA)
++#include <arm/machine_routines.h>
++#endif
+ 
+ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)SWEET_EARLY_FB_PA;
+ #define EARLY_FB early_fb
+@@ -24,6 +27,92 @@ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)SWEET_EARLY
+ 
+ extern unsigned char iso_font[256 * 16];
+ 
++#if defined(SWEET_EARLY_LOG_PA)
++/*
++ * Phone (3a): copy of all console text in the ramoops console zone, read
++ * back with `fastboot oem dmesg` after a warm reset (Power + Vol-). The
++ * asteroids shim already wrote its own lines there in the same layout, so
++ * continue after them. Device memory: byte stores, header words aligned.
++ * Single writer for now (cpus=1); text past the zone end is dropped.
++ *
++ * `ramoops` is the VA=PA address until sweet_early_relocate() (bootstrap
++ * TTBR0 goes away), NULL until sweet_ramoops_map() (fbcon setup), then an
++ * ml_io_map() alias. While NULL, text waits in ramoops_hold.
++ */
++#define RAMOOPS_SIG  0x43474244u        /* "DBGC", Linux PERSISTENT_RAM_SIG */
++#define RAMOOPS_DATA 12u
++#define RAMOOPS_CAP  (SWEET_EARLY_LOG_SIZE - RAMOOPS_DATA)
++
++static volatile uint8_t *ramoops = (volatile uint8_t *)(uintptr_t)SWEET_EARLY_LOG_PA;
++static uint32_t ramoops_len;
++static unsigned int ramoops_open;
++static char ramoops_hold[64 * 1024];
++static uint32_t ramoops_held;
++
++static void
++sweet_ramoops_publish(void)
++{
++	volatile uint32_t *h = (volatile uint32_t *)ramoops;
++	h[1] = ramoops_len;     /* start: next write offset */
++	h[2] = ramoops_len;     /* size: bytes valid (ABL prints the whole zone anyway) */
++	__asm__ volatile("dsb sy" ::: "memory");
++}
++
++static void
++sweet_ramoops_putc(char c)
++{
++	if (!ramoops_open) {
++		volatile uint32_t *h = (volatile uint32_t *)ramoops;
++		ramoops_open = 1;
++		if (h[0] == RAMOOPS_SIG && h[2] < RAMOOPS_CAP / 2) {
++			ramoops_len = h[2];     /* after the shim's lines */
++		} else {
++			h[0] = RAMOOPS_SIG;
++			ramoops_len = 0;
++		}
++	}
++	if (ramoops == NULL) {
++		if (ramoops_held < sizeof(ramoops_hold)) {
++			ramoops_hold[ramoops_held++] = c;
++		}
++		return;
++	}
++	if (ramoops_len >= RAMOOPS_CAP) {
++		return;
++	}
++	ramoops[RAMOOPS_DATA + ramoops_len++] = (uint8_t)c;
++	if (c == '\n') {
++		sweet_ramoops_publish();
++	}
++}
++
++void
++sweet_ramoops_write(const char *c, int size)
++{
++	for (int i = 0; i < size; i++) {
++		sweet_ramoops_putc(c[i]);
++	}
++}
++
++/* Called from the fbcon setup (pexpert/arm/pe_serial.c), once ml_io_map works. */
++void
++sweet_ramoops_map(void)
++{
++	if (ramoops != NULL) {
++		return;
++	}
++	volatile uint8_t *va = (volatile uint8_t *)ml_io_map(SWEET_EARLY_LOG_PA, SWEET_EARLY_LOG_SIZE);
++	if (va == NULL) {
++		return;
++	}
++	ramoops = va;
++	uint32_t n = ramoops_held;
++	ramoops_held = 0;
++	sweet_ramoops_write(ramoops_hold, (int)n);
++	sweet_ramoops_write("[asteroids: ramoops remapped]\n", 30);
++}
++#endif
++
+ /* Initialized data must remain writable until disable, including panics. */
+ static unsigned int early_row, early_col;
+ static unsigned int early_started, early_disabled, early_panicking;
+@@ -42,6 +131,11 @@ sweet_early_clear_row(void)
+ void
+ sweet_early_putc(char c)
+ {
++#if defined(SWEET_EARLY_LOG_PA)
++	if (!early_disabled) {
++		sweet_ramoops_putc(c);  /* after disable, _cnputs feeds the zone */
++	}
++#endif
+ 	if (early_disabled) {
+ 		return;
+ 	}
+@@ -122,6 +216,9 @@ sweet_early_panic(const char *fmt, va_list *args)
+ 	_doprnt(fmt, &copy, sweet_early_putc, 16);
+ 	va_end(copy);
+ 	sweet_early_putc('\n');
++#if defined(SWEET_EARLY_LOG_PA)
++	sweet_ramoops_publish();
++#endif
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
+@@ -131,6 +228,13 @@ sweet_early_relocate(uint64_t base)
+ 	sweet_early_mark(8, "leaving bootstrap TTBR0");
+ 	/* base maps SWEET_EARLY_FB_BLOCK_PA; the framebuffer may start inside it. */
+ 	early_fb = (volatile uint32_t *)(uintptr_t)(base + (SWEET_EARLY_FB_PA - SWEET_EARLY_FB_BLOCK_PA));
++#if defined(SWEET_EARLY_LOG_PA)
++	/* The VA=PA log block leaves with TTBR0: hold text until sweet_ramoops_map(). */
++	if (ramoops_open) {
++		sweet_ramoops_publish();
++	}
++	ramoops = NULL;
++#endif
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ 	sweet_early_mark(9, "kernel framebuffer VA live");
+ }
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index d7a25f2..d2cfa3a 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -12,6 +12,10 @@ void sweet_early_putc(char c);
+ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_disable(void);
++#if defined(SWEET_EARLY_LOG_PA)
++void sweet_ramoops_write(const char *c, int size);
++void sweet_ramoops_map(void);
++#endif
+ #else
+ static inline void sweet_early_mark(unsigned int stage, const char *label)
+ {
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index c86b9e7..6a5fb47 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -267,6 +267,7 @@ _cnputc(char c, bool poll)
+  * @param size The number of characters to print to the console.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <arm64/sweet_early.h>                          /* sweet_ramoops_write */
+ extern void sweet_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c */
+ /*
+  * Set by AppleCLCD (boot-arg sweetfb_noconsole=1) once the GUI presents:
+@@ -283,6 +284,9 @@ _cnputs(char *c, int size, bool poll)
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	sweet_log_append(c, size);
++#if defined(SWEET_EARLY_LOG_PA)
++	sweet_ramoops_write(c, size);   /* Phone (3a): `fastboot oem dmesg` */
++#endif
+ 	if (sweet_console_muted && !panic_active()) {
+ 		return;
+ 	}
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 19f27cd..9a38252 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -834,6 +834,9 @@ fbcon_probe(void)
+ 	if (!fbcon_width || !fbcon_height || fbcon_stride < fbcon_width * 4) {
+ 		return;
+ 	}
++#if defined(SWEET_EARLY_LOG_PA)
++	sweet_ramoops_map();    /* Phone (3a): oem dmesg log, ml_io_map works from here */
++#endif
+ 	sweet_early_mark(17, "fbcon config read; mapping");
+ 	fbcon_base = (volatile uint32_t *)ml_io_map_wcomb(reg[0], reg[1]);
+ 	sweet_early_mark(18, "fbcon mapping returned");
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index 2570eea..2dbf9c1 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -36,6 +36,19 @@
+ #define SWEET_EARLY_FB_BLOCK_PA   (SWEET_EARLY_FB_PA & ~(SWEET_EARLY_FB_BLOCK_SIZE - 1))
+ #define SWEET_EARLY_FB_BLOCKS     2
+ 
++/*
++ * Console mirror for `fastboot oem dmesg`: ABL prints the ramoops console
++ * zone (Linux pstore layout: u32 "DBGC", u32 start, u32 size, then text)
++ * after a warm reset. start.s maps its 32MB block VA=PA as Device memory
++ * (the block also holds Gunyah and boot carve-outs: no Normal mapping, no
++ * speculative reads). There is no kernel-VA room for a third alias block
++ * (virt_base = alias + 2 blocks), so between the TTBR0 teardown and the
++ * fbcon setup (ml_io_map) text is held in RAM, then flushed.
++ */
++#define SWEET_EARLY_LOG_PA        0x81f20000
++#define SWEET_EARLY_LOG_SIZE      0x200000
++#define SWEET_EARLY_LOG_BLOCK_PA  (SWEET_EARLY_LOG_PA & ~(SWEET_EARLY_FB_BLOCK_SIZE - 1))
++
+ /*
+  * All eight cores (six A55 + two A76) as one homogeneous SMP cluster:
+  * cpus=N is clamped here. Same ISA level (ARMv8.2), 64-byte lines, PSCI

@@ -85,6 +85,7 @@ jobs:
           grep -q 'define SWEET_ASTEROIDS' dxb/xnu/pexpert/pexpert/arm64/SWEET.h
           grep -q 'GICR_PE_SIZE              0x40000' dxb/xnu/pexpert/pexpert/arm64/SWEET.h
           grep -q 'SWEET_EARLY_FB_BLOCK_PA' dxb/xnu/osfmk/arm64/start.s
+          grep -q 'sweet_ramoops_write' dxb/xnu/osfmk/console/serial_console.c
 
       - name: Package build tree for local compiles
         if: always()

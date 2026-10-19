@@ -109,3 +109,17 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
   **Not changed: `pe_fiq.c`'s 64-bit `GICR_TYPER` read.** Probe runs 2 and 3 made that exact 64-bit read under Gunyah without an abort.
 - **CI:** `.github/workflows/xnu-asteroids.yml` = upstream workflow + `asteroids/xnu-patches/*.patch` + a step that fails unless patch 0100 is visible in the built tree (`build.sh` only warns when a patch doesn't apply). Artifacts `xnu-kernel-asteroids`, `xnu-buildtree-asteroids` (the file inside is still `kernel.development.sweet`).
 - **ABL kernel-size cap:** ABL has "Kernel size is over the limit" and "BootImage: Size is greater than max download size" (768 MiB). The first limit's value is unknown, so test a large image before the first XNU boot.
+
+## 2026-10-20: kernel build 1, size test, patch 0101
+
+- **Size test:** probe + 64 MiB padding (`asteroids-sizetest-boot.img`, 65,628 KB) `Booting OKAY`. ABL's kernel-size cap is above 64 MiB. Whether the probe then ran couldn't be told from `oem dmesg` (same text as run 3).
+- **CI run 39313723440** (`xnu-asteroids`, patch 0100): success, including the applied-patch check. `kernel.development.sweet` 17,206,056 bytes, SHA256SUMS OK. Kept in `asteroids/kernels/` (git-ignored).
+- **Payload** (`tools/mkxnuboot.sh`): virt_base 0xfffffe0006000000, entry 0xfffffe000748b488, kernel_end 0xfffffe00084c8000, payload 16,610,992 bytes, boot image 16.7 MB (`159bb995...597a`). Boot-args: `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 sweetkeys=0 sweettouch=0 sweetusb=0`. No root device, so it is expected to stop at root mount at best.
+- **Kernel VA room:** the framebuffer alias starts at VM_MIN_KERNEL_ADDRESS + 32 MiB = 0xfffffe0002000000, and two blocks end exactly at virt_base 0xfffffe0006000000. There is **no room for a third alias block**, so the first 0101 draft (log as a third block) was replaced.
+- **Patch 0101 (ramoops console):**
+  - `start.s` maps the 0x80000000 block VA=PA as Device memory;
+  - `sweet_early.c` mirrors early putc / early panic text, and `_cnputs` mirrors all console text, into 0x81f20000 in pstore layout, continuing after the shim's lines;
+  - at `sweet_early_relocate` (TTBR0 teardown) text is held in a 64 KiB RAM buffer;
+  - `pe_serial.c` calls `sweet_ramoops_map()` (`ml_io_map`, Device) before the fbcon mapping, which flushes the held text and logs `[asteroids: ramoops remapped]`.
+  
+  Applies after 0100 on the clean tree.
