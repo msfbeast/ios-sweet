@@ -8,3 +8,8 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+# asteroids (Nothing Phone 3a): stock firmware downloads, device dumps, build output
+firmware/
+asteroids/backup/
+asteroids/dt-live/
+asteroids/shim/out/
