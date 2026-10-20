@@ -91,6 +91,7 @@ jobs:
           grep -q 'RAMOOPS_SHOW' dxb/xnu/osfmk/arm64/sweet_early.c
           grep -q 'at_vote' dxb/xnu/bsd/dev/sweet_touch.c
           grep -q 'sweet_ramoops_stamp' dxb/xnu/osfmk/arm64/sweet_early.c
+          grep -q 'ARM64_BOARD_CONFIG_SWEET' dxb/xnu/iokit/Kernel/IOStartIOKit.cpp
 
       - name: Package build tree for local compiles
         if: always()

@@ -242,3 +242,10 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
 - **Patch 0106:** `[ssss.mmm]` stamps from CNTVCT (19.2 MHz, counted from SoC power-on) before every line in the ramoops log, early putc included; the touch "2000 reads" line printed once. `mkxnuboot.sh` now defaults to `CPUS=8`.
 - **Plan:** kernel 7 on the current root (before), then reflash with the tweak (after), and compare launchd → SpringBoard → first frame times.
 - **Gap 1 (leaving apps) solved on the 3a** (Sajid, build 6/smp8 boots): inside an app, **both** the bottom-edge swipe-up home gesture **and** the Essential Key (sent as Consumer Menu `0x40`) return to the home screen. Upstream sweet could do neither. The touch driver's edge reports (`SWEET HID: touch ... edge`) are the likely difference.
+
+## 2026-10-20: boot timeline "before" (build 7) and patch 0107
+
+- **Boot:** `asteroids-xnu7-boot.img` (CI 39376283712, patches 0100-0106, 8 cores) on the unmodified root. Stamps are CNTVCT seconds since SoC power-on; the kernel starts at 831.456.
+- **Timeline:** UFS userdata +30.3 s, launchd +30.4 s, SpringBoard/backboardd exec +33.0 s, touch driver +50.5 s (20 s delay built in), SpringBoard swaps continue until the restart.
+- **The 30 s is a timeout:** an exact **30.00 s gap** between "buffer headers" and "Security policy loaded: SWEET AMFI" is `IOKitInitializeTime()` (`iokit/Kernel/IOStartIOKit.cpp`) waiting for an `IORTC` resource with `t.tv_sec = 30`. Apple already skips that wait for BCM2837 ("RTC is not present on this target"). **Patch 0107** skips it for `ARM64_BOARD_CONFIG_SWEET` (sweet would gain the same 30 s).
+- Other gaps of 1-8 s in userspace (securityd/AKS errors 0xe00002c7, ReportCrash, MSD preferences) are follow-ups for after the crash loops are removed.
