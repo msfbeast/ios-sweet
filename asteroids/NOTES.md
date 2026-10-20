@@ -123,3 +123,13 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
   - `pe_serial.c` calls `sweet_ramoops_map()` (`ml_io_map`, Device) before the fbcon mapping, which flushes the held text and logs `[asteroids: ramoops remapped]`.
   
   Applies after 0100 on the clean tree.
+
+## 2026-10-20: M2 done: XNU boots on the Phone (3a) to the root-device wait
+
+- **Boot:** `fastboot boot asteroids-xnu2-boot.img` (CI run 39315293493, patches 0100 + 0101, `700e8a16...6de9`). Log via Power + Vol- to fastboot, then `fastboot oem dmesg` (`backup/oem-dmesg-xnu2*.txt`). ABL drops a few bytes per 64-byte chunk, so the quotes below have gaps.
+- **Shim:** payload at 0xa8095000, PHYS 0x8_c0000000 / 4 GiB, 10 segments, end 0x8_c24d8000, boot_args at 0x8_c24dc000, jump to 0x8_c148c488.
+- **Early stages 1-20 all passed:** arm_init with MMU on, PE_init_platform, ml_parse_cpu_topology, cpu_bootp, kernel_startup_bootstrap, cpu_init, arm_vm_init, leaving bootstrap TTBR0 (two-block framebuffer alias + relocation, patch 0100), physmap, pmap_bootstrap, early I/O page tables, serial_init. **`[asteroids: ramoops remapped]`** is printed right before fbcon (patch 0101 hold buffer + `ml_io_map`); fbcon mapping and kprintf follow.
+- **Kernel:** Darwin banner; vm_page_bootstrap 258,756 free pages; zone_init over the window; firehose/oslog; AMFI stand-in, trust cache unavailable (expected), device-tree platform expert, AppleKeyStore stub, IOWatchdog stub, IOSurface root, HID buttons + touch services (drivers off by boot-arg), static battery 100%, **`AppleCLCD 1080x2392 stride 4320 at 0xe3940000 ... presented as 1125x2436`**, **`SWEET CPU: cpu=0 mpidr=0x0 came alive; SGI1 OK`** (GIC + vtimer under Gunyah, `GICR_PE_SIZE 0x40000`), MAC framework, permissive sandbox, HFS+, mbuf, dlil (lo0, gif0, stf0).
+- **Stops at:** `Waiting on <dict ... IOMedia ... Apple_HFS ...>`, i.e. no root device. Expected, because the M2 boot-args set no `rd=`. Also `debug_log_init: gPanicBase not initialized` and `Failed to write boot-picker-bringup-reason to NVRAM` (harmless, as on sweet).
+- **Observation:** the old Android text left in the zone after our log now shows bit flips ("iniT: pbocessing"). Possibly DDR retention across the forced resets; our own freshly written text is clean apart from ABL's chunk drops. Keep an eye on it.
+- **Next (M3):** root on UFS. Sweet's UFS driver at the same host address (UFSHCI 3.0, enabled by ABL, CAP.64AS set) with `rd=ufsroot0 ufsroot=<partition>`, plus the iPhone X 16.7.16 HFS+ root image (`tools/mkiosroot.sh`, needs Linux) and the D22AP `/product` node for the ADT. Decide which partition holds the iOS root: `userdata` (225 GiB, Android data already wiped) as on sweet.
