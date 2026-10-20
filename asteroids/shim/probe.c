@@ -19,6 +19,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "loader.h"
+#include "probe.h"
 
 #define GICD_BASE		0x17100000UL
 #define GICR_BASE		0x17180000UL
@@ -66,7 +67,7 @@ static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; 
 
 extern char secondary_entry[];
 
-static const char *stage;	/* set at runtime: no absolute pointers in data */
+const char *stage;	/* set at runtime: no absolute pointers in data */
 static uint64_t boot_mpidr;
 static volatile uint64_t sec_mpidr[NR_CPUS], sec_midr[NR_CPUS], sec_fault[NR_CPUS];
 static volatile uint32_t irq_count, irq_other, irq_last;
@@ -80,7 +81,7 @@ static volatile int irq_src;
 static volatile int probing;
 static volatile uint64_t probe_esr;
 
-static uint64_t mmio_rd32(uintptr_t a, uint32_t *v)
+uint64_t mmio_rd32(uintptr_t a, uint32_t *v)
 {
 	probe_esr = 0;
 	probing = 1;
@@ -104,7 +105,7 @@ static uint64_t mmio_rd64(uintptr_t a, uint64_t *v)
 	return probe_esr;
 }
 
-static uint64_t mmio_wr32(uintptr_t a, uint32_t v)
+uint64_t mmio_wr32(uintptr_t a, uint32_t v)
 {
 	probe_esr = 0;
 	probing = 1;
@@ -141,20 +142,27 @@ static uint64_t smc(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
 	return x0;
 }
 
-static uint64_t now(void)
+uint64_t now(void)
 {
 	isb();
 	return rsr("cntpct_el0");
 }
 
-static void delay_ms(unsigned ms)
+void delay_ms(unsigned ms)
 {
 	uint64_t end = now() + rsr("cntfrq_el0") / 1000 * ms;
 	while (now() < end)
 		;
 }
 
-static void __attribute__((noreturn)) park(void)
+void delay_us(unsigned us)
+{
+	uint64_t end = now() + rsr("cntfrq_el0") / 1000000 * us;
+	while (now() < end)
+		;
+}
+
+void __attribute__((noreturn)) park(void)
 {
 	for (;;)
 		__asm__ volatile("wfe");
@@ -547,6 +555,13 @@ void shim_main(uint64_t dtb)
 
 	show_initrd(dtb);
 	con_skip();
+#if defined(TOUCH_PROBE)
+	/* TOUCH=1 build: touch bring-up instead of the GIC/UFS/SMP tests. */
+	touch_probe();
+	stage = "done";
+	con_str("DONE", "Power+Vol-, fastboot oem dmesg");
+	park();
+#endif
 
 	stage = "smccc";
 	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
