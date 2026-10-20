@@ -198,3 +198,10 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
   - TLMM: GPIO0/1 cfg 0x203 io 0x3 (ABL leaves them **outputs driving high**), GPIO2/3 inputs.
   - QUP hw 0x300d0000. **SE0 firmware protocol 1 (SPI), FIFOs 32 words, but `GENI_IF_DISABLE_RO = 1`**: the FIFO interface is disabled, so SE0 only does GPI DMA (gpi_dma0 at 0xa00000, GPII 0 static, behind SMMU SID 0x576). The probe stopped there; no rail vote was sent.
 - **Next run:** bit-banged SPI on GPIO 0-3 (MISO in, MOSI/CLK/CS out). Pin order: MISO input before the votes; CS high, CLK and MOSI low, then output enable only after the `ldob11` vote. Log the cost of one 93-byte frame, and arm GPIO19's TLMM latch (falling edge, raw status, no routing) to see whether it tracks touches. Stop on any vote failure. GPI DMA comes later.
+
+## 2026-10-20: touch run 2: touch works in the shim
+
+- **Probe** `c4494561...` (bit-banged SPI). Sajid's photo: the stages through the pin setup and **both RPMh votes succeeded on the v3.0 RSC**: `ldob22` VRM 0x42800, 3300 mV, `vote ok tcs=0 st0=0x10101`; `ldob11` VRM 0x40a00, 1800 mV, `vote ok tcs=0 st0=0x10101`. Pins after the votes: GPIO0 0x80 (MISO in), GPIO1/2/3 0x280 (out, CS io 3 = high), GPIO19 0xc3, GPIO20 0x2c3.
+- The `FT id`/`FRAME`/`TOUCH live` lines fell below the 49 screen rows, but **two fingers drew continuous trails (red id 0, green id 1) across the whole panel**, so: rails up, reset released, FocalTech id accepted, SPI v2 frames with CRC parsed, the coordinate format is right, and both axes are right.
+- The `oem dmesg` after it was a **recovery-mode Linux boot** (`First stage mount skipped (recovery mode)`): the phone went through OrangeFox on the way back to fastboot, and that boot's pstore overwrote the probe log. Frame cost and INT latch behaviour are not known yet. To check: why recovery was booted (key combo or a reset), and that the iOS root on userdata is intact.
+- **Next:** patch 0105, the XNU touch driver for SWEET_ASTEROIDS: GCC QUP0 vote is not needed for bit-banging, so only the RPMh v3 votes, TLMM pins/reset, the bit-banged FocalTech SPI v2 and the polling thread feeding `sweet_hid_touch`.
