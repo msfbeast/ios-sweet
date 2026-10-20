@@ -181,3 +181,10 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
 - **0104 `sweet_early.c`:** `oem dmesg` only shows about the first 240 KB, so the zone text stays inside 208 KiB: the first 64 KiB are kept, the rest is a ring, and after each line a marker `=== asteroids ring: newest text above, oldest below ===` shows the write head.
 - `mkxnuboot.sh`: the sweet drivers to keep off are now `OFF=...` (default keys, touch and USB off). M5 key test: `OFF="sweettouch=0 sweetusb=0"` plus the root args plus `sweetfb_noconsole=1`.
 - **Fix (before any boot of build 4):** the touch research found that Nothing's `pinctrl-volcano.c` has `REG_BASE 0x100000`. TLMM GPIO n is at `0xf100000 + 0x1000*n`, so the Essential Key IN_OUT is **0xf147004**, not 0xf047004. Patch 0103 regenerated; build 4's image renamed `BAD-tlmm-...` and never booted. The touch research report is `asteroids/research-touch.md` (FocalTech FT3683G/FT3681 over SPI, RPMh `ldob11`/`ldob22`, RSC v3 on the 3a, GENI SPI sequence, GCC QUPv3 wrap0 S0 clock).
+
+## 2026-10-20: M5 keys work (build 5)
+
+- **Boot:** `asteroids-xnu5-keys-boot.img` (CI 39361325595, patches 0100-0104 with the TLMM fix; `f656bc3c...`), keys on, touch/USB off, `sweetfb_noconsole=1`. Log `backup/oem-dmesg-keys*.txt`.
+- **Init line:** `arb=0x70010000` (**PMIC arbiter v7** confirmed), pon-apid 3, volup-apid 31; PON RT idle 0x10; GPIO6 RT 0x1 (high = released); mode/en 0x80 enabled, subtype 0x13. Volume-up GPIO accepted as an input.
+- **Presses (Sajid on the lock screen):** power → pon 0x90 (bit 7) → HID `0x30`; volume down → pon 0x50 (bit 6) → `0xea`; volume up → GPIO RT 0 → `0xe9`; Essential Key (TLMM 71 at 0xf147004) → `0x40` (Menu/Home). Each one logged `SWEET HID: key ... down/up (1 clients)` (backboardd's HID client). After a power press: `SWEET AKS: SpringBoard sel 26 arg0 2` (lock state change).
+- The `oem dmesg` zone's tail after our text is stale text from the previous boot (identical to the end of `oem-dmesg-ios1`). The ring didn't wrap this time.
