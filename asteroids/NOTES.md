@@ -228,3 +228,9 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
   - **INT latch works**: 492 of the first 2000 reads had GPIO19's falling-edge latch set.
 - **HID:** `SWEET HID: touch 0 down/up at x,y`, with `edge` marks for border swipes. Key events still delivered (Essential Key `0x40`, power `0x30`, volume down). SpringBoard lock-state change after a swipe (`AKS: SpringBoard sel 26`).
 - **Bug to fix:** the "2000 reads" message repeats on every idle tick (`reads` stays at 2000 between reads). Print it once.
+
+## 2026-10-20: all 8 cores (cpus=8)
+
+- **Boot:** kernel 6 (CI 39373903153) with `cpus=8` (`asteroids-xnu6-smp8-boot.img`, `32aaa6f5...`). No kernel change was needed.
+- **SMP:** `SWEET CPU: requested=8 selected=8 (limit=8)`; CPUs 1-7: `PSCI CPU_ON target=0x100..0x700 entry_pa=0x8c148e000 rc=0`, `came alive; SGI1 OK`; then **`8/8 CPUs initialized, SGI1 verified`**. That includes the four A720 cores (upstream patch 0078 + the 0x40000 GICR stride from patch 0100).
+- **iOS on 8 cores:** UFS root read-write, sweet's persistent log ring at the end of userdata active, SpringBoard + backboardd up, touch driver up (FT3683G **fw 0x3d**, 1313 us/frame), 38 touch events in the captured window, no panic.
