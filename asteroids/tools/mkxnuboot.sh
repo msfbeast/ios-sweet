@@ -17,8 +17,8 @@ mkdir -p "$OUT"
 # M2 boot-args: early console only. No rd=ufsroot0 / ufsrw / rootrw: sweet's
 # persistent log would write the end of userdata. sweet's keys, touch and
 # USB drivers start by default and poke Redmi MMIO, so switch them off.
-# CPUS: cores to start (1 = safe fallback; 8 = all, A520 x4 + A720 x4).
-ARGS="debug=0xc serial=3 cpus=${CPUS:-1} keepsyms=1 -enable_kprintf_spam -noprogress"
+# CPUS: cores to start (8 = all, A520 x4 + A720 x4, tested 2026-10-20; 1 = fallback).
+ARGS="debug=0xc serial=3 cpus=${CPUS:-8} keepsyms=1 -enable_kprintf_spam -noprogress"
 # OFF lists the sweet drivers to keep off (override: OFF="sweetusb=0" ...).
 OFF=${OFF-"sweetkeys=0 sweettouch=0 sweetusb=0"}
 ARGS="$ARGS wdt=-1 $OFF $*"

@@ -234,3 +234,10 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
 - **Boot:** kernel 6 (CI 39373903153) with `cpus=8` (`asteroids-xnu6-smp8-boot.img`, `32aaa6f5...`). No kernel change was needed.
 - **SMP:** `SWEET CPU: requested=8 selected=8 (limit=8)`; CPUs 1-7: `PSCI CPU_ON target=0x100..0x700 entry_pa=0x8c148e000 rc=0`, `came alive; SGI1 OK`; then **`8/8 CPUs initialized, SGI1 verified`**. That includes the four A720 cores (upstream patch 0078 + the 0x40000 GICR stride from patch 0100).
 - **iOS on 8 cores:** UFS root read-write, sweet's persistent log ring at the end of userdata active, SpringBoard + backboardd up, touch driver up (FT3683G **fw 0x3d**, 1313 us/frame), 38 touch events in the captured window, no panic.
+
+## 2026-10-20: boot time work: patch 0106, root tweak
+
+- **Crash loops** (`exec` lines in the ring logs): `xpcproxy` 159/176, **bluetoothd** 10-15 in the window (92 in the first full boot), **fairplayd.H2** 8 (52), with no CRASH reports: they exit and launchd relaunches them. launchd.plist jobs: `com.apple.bluetoothd` (KeepAlive SuccessfulExit=false, RunAtLoad) and `com.apple.fairplayd.H2` (KeepAlive=true). wifid, locationd and mediaserverd don't loop. driverkitd: one sig 9 per boot.
+- **`asteroids/tools/asteroids-root-tweaks.py`** removes those two jobs (backup `launchd.plist.asteroids-orig`). **`update-root.sh`** mounts the image read-write, applies the tweak, checks it with fsck_hfs and regenerates `ios16-root.simg`.
+- **Patch 0106:** `[ssss.mmm]` stamps from CNTVCT (19.2 MHz, counted from SoC power-on) before every line in the ramoops log, early putc included; the touch "2000 reads" line printed once. `mkxnuboot.sh` now defaults to `CPUS=8`.
+- **Plan:** kernel 7 on the current root (before), then reflash with the tweak (after), and compare launchd → SpringBoard → first frame times.

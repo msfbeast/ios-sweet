@@ -1,0 +1,89 @@
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 935d601..1816c55 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -1065,6 +1065,7 @@ at_thread(void *arg, wait_result_t result)
+ 	    ns / 1000);
+ 
+ 	unsigned errors = 0, ticks = 0, latched = 0, reads = 0;
++	bool reported = false;
+ 	for (;;) {
+ 		uint32_t latch = at_rd(at.tlmm, AT_GPIO(AT_INT) + 0xc) & 1u;
+ 		if (latch) {
+@@ -1084,7 +1085,8 @@ at_thread(void *arg, wait_result_t result)
+ 				errors = 0;
+ 			}
+ 		}
+-		if (reads == 2000) {
++		if (reads == 2000 && !reported) {
++			reported = true;        /* reads stays at 2000 between reads */
+ 			printf("SWEET TOUCH: 2000 reads, %u with the INT latch set\n", latched);
+ 		}
+ 		at_wait(10);
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 6418d47..bc5578e 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -59,6 +59,7 @@ static unsigned int ramoops_open;
+ static char ramoops_hold[64 * 1024];
+ static uint32_t ramoops_held;
+ static uint32_t ramoops_wraps;
++static unsigned int ramoops_midline;    /* 0 at the start of a line */
+ 
+ static void
+ sweet_ramoops_publish(void)
+@@ -103,11 +104,45 @@ sweet_ramoops_putc(char c)
+ 	}
+ }
+ 
++/*
++ * "[ssss.mmm] " before every line, from the virtual counter (19.2 MHz on the
++ * Phone (3a); counts from SoC power-on, so ABL time is included). Readable
++ * before the timebase is set up, and costs no locks.
++ */
++static void
++sweet_ramoops_stamp(void)
++{
++	uint64_t ms = __builtin_arm_rsr64("CNTVCT_EL0") / 19200;
++	char buf[12];
++	int n = 0;
++	unsigned int s = (unsigned int)(ms / 1000), frac = (unsigned int)(ms % 1000);
++	buf[n++] = '[';
++	for (unsigned int d = 1000; d; d /= 10) {
++		buf[n++] = (char)('0' + (s / d) % 10);
++	}
++	buf[n++] = '.';
++	buf[n++] = (char)('0' + frac / 100);
++	buf[n++] = (char)('0' + (frac / 10) % 10);
++	buf[n++] = (char)('0' + frac % 10);
++	buf[n++] = ']';
++	for (int i = 0; i < n; i++) {
++		sweet_ramoops_putc(buf[i]);
++	}
++	sweet_ramoops_putc(' ');
++}
++
+ void
+ sweet_ramoops_write(const char *c, int size)
+ {
+ 	for (int i = 0; i < size; i++) {
++		if (!ramoops_midline && c[i] != '\n') {
++			ramoops_midline = 1;
++			sweet_ramoops_stamp();
++		}
+ 		sweet_ramoops_putc(c[i]);
++		if (c[i] == '\n') {
++			ramoops_midline = 0;
++		}
+ 	}
+ }
+ 
+@@ -150,7 +185,7 @@ sweet_early_putc(char c)
+ {
+ #if defined(SWEET_EARLY_LOG_PA)
+ 	if (!early_disabled) {
+-		sweet_ramoops_putc(c);  /* after disable, _cnputs feeds the zone */
++		sweet_ramoops_write(&c, 1);     /* after disable, _cnputs feeds the zone */
+ 	}
+ #endif
+ 	if (early_disabled) {
