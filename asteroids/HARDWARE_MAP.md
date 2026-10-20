@@ -46,7 +46,7 @@ The latest firmware (`B4.1-260928-1204`) has the same addresses for everything b
 | Essential Key | (none) | `ai_key`, TLMM GPIO 71, code 0xfa | Bonus button. Could map to Siri or AssistiveTouch |
 | SPMI arbiter | cnfg 0x0c40a000, core 0x0c440000, obsrvr 0x0e600000 | cnfg **0xc42d000**, core 0xc400000, chnls 0xc500000, obsrvr 0xc440000, intr 0xc4c0000 | Newer arbiter generation, so the register layout differs. Key driver needs a rework |
 | RPMh / cmd-db | RSC 0x18220000, cmd-db dict 0x0c3f000c | `apps_rsc` at **0x17a00000** (drv-0/1/2), cmd-db at **0x81c60000** | New addresses, same mechanism (needed for touch power) |
-| TLMM | 0x03900000 (north tile) | **0xf000000** (`qcom,volcano-pinctrl`, single block) | New base, simpler layout |
+| TLMM | 0x03900000 (north tile) | DT reg **0xf000000** (`qcom,volcano-pinctrl`), but the GPIO registers start at **+0x100000** (`REG_BASE` in Nothing's `pinctrl-volcano.c`): GPIO n ctl at `0xf100000 + 0x1000*n`, IN_OUT at +4 | New base. Always add the 0x100000 |
 | Clocks | GCC 0x00100000 | GCC 0x100000 (`qcom,volcano-gcc`) | Same base. Register offsets differ |
 | Battery | Static 100 % | `pmic_glink` + `battery-charger` (lives in the ADSP firmware) | A real reading needs the ADSP booted plus GLINK. That's a big job, not a quick win |
 | GPU | Adreno 618, unused | `qcom,adreno-gpu-gen8-3-0` at 0x3d00000 (consistent with Adreno 810) | Unused, same as sweet. CPU rendering stays |
