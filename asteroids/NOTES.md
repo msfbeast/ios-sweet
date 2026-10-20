@@ -154,3 +154,17 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
   - TUR → sense 02/00/00 (NOT READY). SSU start=1 on LUN 0 → 02/04/00, then 02/00/00 again. SSU POWER CONDITION=ACTIVE on the device W-LUN 0xd0 → **`LUN 0 ready after 4 retries`**. ABL leaves the UFS device in a low-power mode; the W-LUN power change is what wakes it.
   - `"userdata" on LUN 0: ... 230237 MiB, read-only`, then `Boot: ufsroot0`, `hfs_ValidateHFSPlusVolumeHeader: unknown Volume Signature`, `cannot mount root, errno 22`. Expected: userdata still holds Android's f2fs.
 - **M3 boot image** `asteroids-xnu3-root-boot.img`: kernel 3 + ADT with `/product`. Boot-args: `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 sweetkeys=0 sweettouch=0 sweetusb=0 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 wdt_test=no_user_checkin`.
+
+## 2026-10-20: M3 + M4: iOS 16.7.16 lock screen on the Phone (3a)
+
+- **Flash:** `img2simg` (Homebrew `simg2img` 1.1.5) turned the raw image into `ios16-root.simg`: 13,034 RAW chunks (10.84 GiB) + 13,034 FILL (5.16 GiB), **no DONT_CARE**. A raw 16 GiB `fastboot flash` fails client-side ("Failed reading from userdata": `copy_avb_footer` reads the whole file). `fastboot -S 512M flash userdata ios16-root.simg`: 23 sparse chunks, all OKAY, 309.6 s. ABL `parallel-download-flash:yes` makes each "Writing" return in ms. A flash right after an aborted `oem dmesg` hung with no output: **after `oem dmesg` + Ctrl+C, re-enter fastboot (Power + Vol-) and replug before the next command.**
+- **Boot:** `asteroids-xnu3-root-boot.img` (`b7f0a38f...`). `Booting OKAY` took 75 s (ABL still committing the parallel flash). Sajid saw the **iOS lock screen**, with kernel console text still drawn over it (no `sweetfb_noconsole=1` on purpose for the first boot).
+- **Log** (`oem dmesg`, `backup/oem-dmesg-ios1*.txt`):
+  - `"userdata" on LUN 0 ... read-write`;
+  - launchd loaded (`/sbin/launchd`, libignition level 1);
+  - shared cache segments "not in trust cache" (expected, CSR allows);
+  - backboardd opens AppleCLCD (`SWEET FB: backboardd sel 57/2/29/33/79/6/27/50 ... -> 0x0`);
+  - the SpringBoard[26] and backboardd[56] thread samples (SMP sampler) show both alive.
+  - **Crash loops:** bluetoothd (92 execs in the captured part) and fairplayd.H2 (52), as on sweet (no Bluetooth, no SEP). CRASH reports: PosterBoard (x3, lock-screen poster), driverkitd (sig 9). AppleKeyStore stub serving dasd (sel 17).
+- **oem dmesg limit:** ABL prints only about the first 240 KB of the zone (every dump is ~300 KB raw / ~243 KB text). A full iOS boot overflows it, so later text is lost. Next log patch: a ring inside the first ~200 KB with a wrap marker, or rely on sweet's 4 MiB ring at the end of userdata (OrangeFox + `tools/sweet-log-pull.sh`).
+- **Next:** `sweetfb_noconsole=1`; the ramoops ring; **M5** for the 3a: power key + volume keys (PMK8550 PON / PMXR2230 GPIO over SPMI at 0xc42d000, new arbiter) and FocalTech touch over GENI SPI (SE0 0xa80000, TLMM 19/20); then SMP (`cpus=8`); then home gesture and boot time.
