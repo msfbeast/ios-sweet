@@ -41,7 +41,7 @@ trap cleanup EXIT
 # 1. Image names from BuildManifest.plist (the iPhone10,3 / d22ap erase identity).
 read -r os sysos appos < <(unzip -p "$ipsw" BuildManifest.plist | python3 -I -c '
 import plistlib, sys
-m = plistlib.load(sys.stdin.buffer)
+m = plistlib.loads(sys.stdin.buffer.read())   # a pipe is not seekable
 for b in m["BuildIdentities"]:
     info = b["Info"]
     if info.get("DeviceClass") == "d22ap" and info.get("RestoreBehavior") == "Erase":
