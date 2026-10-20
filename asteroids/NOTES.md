@@ -249,3 +249,11 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
 - **Timeline:** UFS userdata +30.3 s, launchd +30.4 s, SpringBoard/backboardd exec +33.0 s, touch driver +50.5 s (20 s delay built in), SpringBoard swaps continue until the restart.
 - **The 30 s is a timeout:** an exact **30.00 s gap** between "buffer headers" and "Security policy loaded: SWEET AMFI" is `IOKitInitializeTime()` (`iokit/Kernel/IOStartIOKit.cpp`) waiting for an `IORTC` resource with `t.tv_sec = 30`. Apple already skips that wait for BCM2837 ("RTC is not present on this target"). **Patch 0107** skips it for `ARM64_BOARD_CONFIG_SWEET` (sweet would gain the same 30 s).
 - Other gaps of 1-8 s in userspace (securityd/AKS errors 0xe00002c7, ReportCrash, MSD preferences) are follow-ups for after the crash loops are removed.
+
+## 2026-10-20: "after" boot (build 8 + jobs removed): kernel 30 s faster, userspace hung
+
+- **Kernel:** patch 0107 works. UFS userdata at **+0.26 s** after the kernel's first line (was +30.3 s), launchd +0.63 s, backboardd exec +3.4 s, data migration +10.9 s (fresh flash), touch +20.5 s.
+- **Hang:** the Apple logo stayed up. The SMP sampler shows **SpringBoard t0 at the same pc for 240+ s**. Symbolized with blacktop `ipsw` 3.1.739 (checksum-verified release) against the root's shared cache (slide 0x41ff0000):
+  - `__ulock_wait` ← `os_unfair_lock_lock_slow` ← `_LSContextInitCommon` ← `LaunchServices::Database::Context::_get` ← `-[LSApplicationRecord initWithBundleIdentifier:allowPlaceholder:error:]` ← `-[CCSModuleRepository _queue_filterModuleMetadataByAssociatedBundleAvailability:]` ← `-[CCSModuleRepository _initWithDirectoryURLs:allowedModuleIdentifiers:]`
+  - So Control Center setup waits on the LaunchServices database lock while the post-flash rebuild never finishes. The first post-flash boot (with both daemons present) didn't hang, so the removed jobs (most likely fairplayd.H2) are the dependency.
+- **Change:** `asteroids-root-tweaks.py` now keeps both jobs (always rebuilt from `launchd.plist.asteroids-orig`) with `KeepAlive=false` and `RunAtLoad=false`: no automatic start or relaunch loop, but launch on demand still works.
