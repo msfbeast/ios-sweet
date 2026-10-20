@@ -216,3 +216,15 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
   - bit-banged SPI v2 frames with CRC16/MCRF4XX;
   - reports type 0/2 → `sweet_hid_touch` through the same `touch_report` model as sweet.
 - **Polling:** every 10 ms while a finger is down or the GPIO19 falling-edge latch is set, otherwise every 100 ms. Logs the cost of one frame and, after 2000 reads, how many had the latch set. Starts after `sweettouchdelay` (default 20 s).
+
+## 2026-10-20: touch works in iOS (build 6)
+
+- **Boot:** `asteroids-xnu6-touch-boot.img` (CI 39373903153, patches 0100-0105, `c5c3b467...`), keys + touch on, USB off. Log `backup/oem-dmesg-touch-ios*.txt` (the ring wrapped; marker present).
+- **Driver:**
+  - RSC id 0x30200 (v3);
+  - `ldob22 3300 mV vote ok (TCS0 st0=0x10101)`, `ldob11 1800 mV vote ok`;
+  - **FocalTech id 56:72 = FT3683G**;
+  - **one 93-byte bit-banged frame = 1323 us**;
+  - **INT latch works**: 492 of the first 2000 reads had GPIO19's falling-edge latch set.
+- **HID:** `SWEET HID: touch 0 down/up at x,y`, with `edge` marks for border swipes. Key events still delivered (Essential Key `0x40`, power `0x30`, volume down). SpringBoard lock-state change after a swipe (`AKS: SpringBoard sel 26`).
+- **Bug to fix:** the "2000 reads" message repeats on every idle tick (`reads` stays at 2000 between reads). Print it once.
