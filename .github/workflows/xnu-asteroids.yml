@@ -87,6 +87,8 @@ jobs:
           grep -q 'SWEET_EARLY_FB_BLOCK_PA' dxb/xnu/osfmk/arm64/start.s
           grep -q 'sweet_ramoops_write' dxb/xnu/osfmk/console/serial_console.c
           grep -q 'ufs_unit_ready' dxb/xnu/bsd/dev/sweet_ufs.c
+          grep -q 'KEYS_ESS_PA' dxb/xnu/bsd/dev/sweet_keys.c
+          grep -q 'RAMOOPS_SHOW' dxb/xnu/osfmk/arm64/sweet_early.c
 
       - name: Package build tree for local compiles
         if: always()

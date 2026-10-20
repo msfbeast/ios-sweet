@@ -2,7 +2,7 @@
 # Package an asteroids xnu kernel into a `fastboot boot` image for the Phone (3a):
 #   ADT (asteroids/tools/mkadt.py) -> payload (tools/mkpayload.py) -> shim + payload
 #
-#   asteroids/tools/mkxnuboot.sh KERNEL [EXTRA BOOT-ARGS...]
+#   [OFF="..."] asteroids/tools/mkxnuboot.sh KERNEL [EXTRA BOOT-ARGS...]
 #
 # KERNEL is kernel.development.sweet from the xnu-kernel-asteroids CI
 # artifact (never upstream's xnu-kernel: that one is built for sweet).
@@ -18,7 +18,9 @@ mkdir -p "$OUT"
 # persistent log would write the end of userdata. sweet's keys, touch and
 # USB drivers start by default and poke Redmi MMIO, so switch them off.
 ARGS="debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress"
-ARGS="$ARGS wdt=-1 sweetkeys=0 sweettouch=0 sweetusb=0 $*"
+# OFF lists the sweet drivers to keep off (override: OFF="sweetusb=0" ...).
+OFF=${OFF-"sweetkeys=0 sweettouch=0 sweetusb=0"}
+ARGS="$ARGS wdt=-1 $OFF $*"
 
 python3 asteroids/tools/mkadt.py "$OUT/asteroids.adt"
 python3 tools/mkpayload.py "$KERNEL" "$OUT/asteroids.adt" "$OUT/xnu-payload.bin" --cmdline "$ARGS"

@@ -168,3 +168,15 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
   - **Crash loops:** bluetoothd (92 execs in the captured part) and fairplayd.H2 (52), as on sweet (no Bluetooth, no SEP). CRASH reports: PosterBoard (x3, lock-screen poster), driverkitd (sig 9). AppleKeyStore stub serving dasd (sel 17).
 - **oem dmesg limit:** ABL prints only about the first 240 KB of the zone (every dump is ~300 KB raw / ~243 KB text). A full iOS boot overflows it, so later text is lost. Next log patch: a ring inside the first ~200 KB with a wrap marker, or rely on sweet's 4 MiB ring at the end of userdata (OrangeFox + `tools/sweet-log-pull.sh`).
 - **Next:** `sweetfb_noconsole=1`; the ramoops ring; **M5** for the 3a: power key + volume keys (PMK8550 PON / PMXR2230 GPIO over SPMI at 0xc42d000, new arbiter) and FocalTech touch over GENI SPI (SE0 0xa80000, TLMM 19/20); then SMP (`cpus=8`); then home gesture and boot time.
+
+## 2026-10-20: M5 start: keys (patch 0103), ramoops ring (0104)
+
+- **0103 `bsd/dev/sweet_keys.c`** (SWEET_ASTEROIDS): PMIC arbiter **v7**, layout from Linux `spmi-pmic-arb.c`:
+  - APID map `core+0x2000+4n`, owner `cnfg+4n`, observer `0x20*apid` (EE 0); same EXT_READL command, STATUS (+0x8) and RDATA0 (+0x18) as v5;
+  - core 0xc400000 (0x3000), cnfg 0xc42d000, obsrvr 0xc440000;
+  - power: PPID 0x013 (PMK8550 SID 0 `pon_hlos` 0x1300), RT_STS 0x1310 bit 7; volume down: bit 6 (DT interrupt numbers 7/6);
+  - volume up: PPID 0x18d (PMXR2230 SID 1 GPIO6 0x8d00), RT_STS 0x8d10 bit 0, active low (Linux `pmic_gpio_get` also reads RT_STS);
+  - **Essential Key**: TLMM GPIO 71 IN_OUT (0x0f047004) bit 0, active low, sent as key 3 = `kHIDUsage_Csmr_Menu` (Home) through the existing `sweet_hid_key`;
+  - still read-only on the PMIC.
+- **0104 `sweet_early.c`:** `oem dmesg` only shows about the first 240 KB, so the zone text stays inside 208 KiB: the first 64 KiB are kept, the rest is a ring, and after each line a marker `=== asteroids ring: newest text above, oldest below ===` shows the write head.
+- `mkxnuboot.sh`: the sweet drivers to keep off are now `OFF=...` (default keys, touch and USB off). M5 key test: `OFF="sweettouch=0 sweetusb=0"` plus the root args plus `sweetfb_noconsole=1`.
