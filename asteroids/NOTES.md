@@ -146,3 +146,11 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
   
   0100-0102 apply in order on the clean tree; CI checks for `ufs_unit_ready`.
 - **Root image:** IPSW download from Apple running (`research/ipsw-x`, git-ignored). `asteroids/tools/mkiosroot-mac.sh` written (hdiutil + newfs_hfs + Homebrew rsync + sweet-root-tweaks.py), not run yet.
+
+## 2026-10-20: M3: kernel 3 reads userdata; root image built
+
+- **Root image:** `asteroids/tools/mkiosroot-mac.sh` ran (Sajid, sudo) on the 16.7.16 IPSW (OS 087-86698-044, SystemOS 087-86593-047, AppOS 087-86715-047): 16 GiB raw case-sensitive journaled HFS+, 11 GiB used, 326k inodes, `fsck_hfs`: OK. The tweak script warned "no mobileactivationd system container" (same as sweet; activation comes from the ADT security status). A cleanup bug (empty arrays under `set -u` on bash 3.2) left the images attached and 7.5 GB in /tmp; cleaned by hand, script fixed. D22AP device tree from `Firmware/all_flash/DeviceTree.d22ap.im4p` → `research/ipsw-x/d22ap.adt` (`/product` now in the ADT, 12,812 bytes).
+- **Read-only UFS test with kernel 3** (CI 39353612681, patches 0100-0102), `asteroids-xnu3-ufsro-boot.img` `58d6f948...`:
+  - TUR → sense 02/00/00 (NOT READY). SSU start=1 on LUN 0 → 02/04/00, then 02/00/00 again. SSU POWER CONDITION=ACTIVE on the device W-LUN 0xd0 → **`LUN 0 ready after 4 retries`**. ABL leaves the UFS device in a low-power mode; the W-LUN power change is what wakes it.
+  - `"userdata" on LUN 0: ... 230237 MiB, read-only`, then `Boot: ufsroot0`, `hfs_ValidateHFSPlusVolumeHeader: unknown Volume Signature`, `cannot mount root, errno 22`. Expected: userdata still holds Android's f2fs.
+- **M3 boot image** `asteroids-xnu3-root-boot.img`: kernel 3 + ADT with `/product`. Boot-args: `debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress wdt=-1 sweetkeys=0 sweettouch=0 sweetusb=0 rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1 wdt_test=no_user_checkin`.
