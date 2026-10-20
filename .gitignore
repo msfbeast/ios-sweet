@@ -14,3 +14,6 @@ asteroids/backup/
 asteroids/dt-live/
 asteroids/shim/out/
 asteroids/kernels/
+
+# M3 root images (Apple content): never commit
+asteroids/root/
