@@ -133,3 +133,16 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
 - **Stops at:** `Waiting on <dict ... IOMedia ... Apple_HFS ...>`, i.e. no root device. Expected, because the M2 boot-args set no `rd=`. Also `debug_log_init: gPanicBase not initialized` and `Failed to write boot-picker-bringup-reason to NVRAM` (harmless, as on sweet).
 - **Observation:** the old Android text left in the zone after our log now shows bit flips ("iniT: pbocessing"). Possibly DDR retention across the forced resets; our own freshly written text is clean apart from ABL's chunk drops. Keep an eye on it.
 - **Next (M3):** root on UFS. Sweet's UFS driver at the same host address (UFSHCI 3.0, enabled by ABL, CAP.64AS set) with `rd=ufsroot0 ufsroot=<partition>`, plus the iPhone X 16.7.16 HFS+ root image (`tools/mkiosroot.sh`, needs Linux) and the D22AP `/product` node for the ADT. Decide which partition holds the iOS root: `userdata` (225 GiB, Android data already wiped) as on sweet.
+
+## 2026-10-20: M3 step 1: read-only UFS test, patch 0102
+
+- **Boot:** kernel 2 + `rd=ufsroot0` (no `ufsrw`), `asteroids-xnu2-ufsro-boot.img` (`bcb16091...7a97`). Log via `oem dmesg` (`backup/oem-dmesg-ufsro*.txt`).
+- **Result:** the UFS host takeover, UTRL in our DMA buffer at 0x8_c..., doorbell and completion all work on the 3a. `TEST UNIT READY` to LUN 0 completed with `ocs 0x0 upiu 0x21 response 0x1 status 0x2` (transport OK, target answered CHECK CONDITION) three times. Then `IOFindBSDRoot: SWEET UFS root ufsroot0 unavailable: 5`, and the expected panic.
+- **Reading:** LUN 0 (userdata, persist, super, metadata) is not ready after ABL, which boots from LUNs 1-5. Upstream's driver gives up after 3 TURs and never reads the sense data.
+- **Patch 0102 (`bsd/dev/sweet_ufs.c`):**
+  - parse the RESPONSE UPIU sense (bytes 32-33 length, fixed sense from 34) and print key/ASC/ASCQ;
+  - `ufs_unit_ready()`: up to 10 TURs 20 ms apart; on NOT READY, `START STOP UNIT` START=1 on the LUN (try 2), then SSU POWER CONDITION=ACTIVE on the UFS Device W-LUN 0xd0 (try 4), as Linux ufshcd does;
+  - no medium access.
+  
+  0100-0102 apply in order on the clean tree; CI checks for `ufs_unit_ready`.
+- **Root image:** IPSW download from Apple running (`research/ipsw-x`, git-ignored). `asteroids/tools/mkiosroot-mac.sh` written (hdiutil + newfs_hfs + Homebrew rsync + sweet-root-tweaks.py), not run yet.

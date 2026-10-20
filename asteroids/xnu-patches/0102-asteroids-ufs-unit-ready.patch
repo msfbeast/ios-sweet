@@ -1,0 +1,99 @@
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 6b926fe..a16ccea 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -141,6 +141,13 @@ dma_clean(uint32_t off, uint32_t len)
+ 	clean_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
+ }
+ 
++/*
++ * Sense of the last CHECK CONDITION: key << 16 | ASC << 8 | ASCQ, else 0.
++ * Phone (3a): LUN 0 answered TEST UNIT READY with CHECK CONDITION three times
++ * (ABL boots from other LUNs and may leave LUN 0 stopped).
++ */
++static uint32_t ufs_last_sense;
++
+ /*
+  * One SCSI command in slot 0, data (if any) to/from the bounce buffer
+  * (to the device when write is set). Returns 0 or an errno.
+@@ -148,6 +155,7 @@ dma_clean(uint32_t off, uint32_t len)
+ static int
+ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ {
++	ufs_last_sense = 0;
+ 	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
+ 	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
+ 	uint64_t ucd_pa = su.dma_pa + DMA_UCD, bounce_pa = su.dma_pa + DMA_BOUNCE;
+@@ -251,6 +259,14 @@ ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+ 		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
++		/* RESPONSE UPIU: sense data length at 32-33, fixed-format sense from 34. */
++		unsigned sense_len = (unsigned)ucd->resp[32] << 8 | ucd->resp[33];
++		if (!ocs && ucd->resp[0] == 0x21 && ucd->resp[7] == 0x02 && sense_len >= 14) {
++			const uint8_t *sense = &ucd->resp[34];
++			ufs_last_sense = (uint32_t)(sense[2] & 0xf) << 16 | (uint32_t)sense[12] << 8 | sense[13];
++			printf("SWEET UFS: LUN 0x%x sense key 0x%x asc 0x%02x ascq 0x%02x\n",
++			    ucd->cmd[2], sense[2] & 0xf, sense[12], sense[13]);
++		}
+ 		return EIO;
+ 	}
+ 	return 0;
+@@ -299,6 +315,45 @@ ufs_sync_cache(void)
+ 	return ufs_scsi(cdb, sizeof(cdb), 0, false);
+ }
+ 
++/*
++ * Wait for LUN 0 to be ready. A unit attention clears on a retry; NOT READY
++ * (sense key 2) gets START STOP UNIT with START=1 on the LUN, then on the
++ * UFS Device well-known LUN (0xd0) with POWER CONDITION=ACTIVE, as Linux's
++ * ufshcd does after the bootloader. Neither touches the medium.
++ */
++static int
++ufs_unit_ready(void)
++{
++	static const uint8_t tur[6] = { 0x00 };
++	static const uint8_t ssu_start[6] = { 0x1b, 0, 0, 0, 0x01, 0 };
++	static const uint8_t ssu_active[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
++	int error = EIO;
++
++	for (int i = 0; i < 10; i++) {
++		error = ufs_scsi(tur, sizeof(tur), 0, false);
++		if (!error) {
++			if (i) {
++				printf("SWEET UFS: LUN %u ready after %d retries\n", su.lun, i);
++			}
++			return 0;
++		}
++		if ((ufs_last_sense >> 16) == 0x2) {
++			if (i == 1) {
++				printf("SWEET UFS: LUN %u not ready: START STOP UNIT start=1\n", su.lun);
++				(void)ufs_scsi(ssu_start, sizeof(ssu_start), 0, false);
++			} else if (i == 3) {
++				uint8_t lun = su.lun;
++				printf("SWEET UFS: still not ready: device W-LUN power condition active\n");
++				su.lun = 0xd0;
++				(void)ufs_scsi(ssu_active, sizeof(ssu_active), 0, false);
++				su.lun = lun;
++			}
++		}
++		delay(20000);   /* 20 ms */
++	}
++	return error;
++}
++
+ static int
+ ufs_find_partition(const char *want)
+ {
+@@ -624,10 +679,8 @@ sweet_ufs_init(void)
+ 	lck_mtx_lock(&sweet_ufs_lock);
+ 	error = ufs_take_over_host();
+ 	if (!error) {
+-		static const uint8_t tur[6] = { 0x00 };
+ 		/* The first command after the bootloader may report a unit attention. */
+-		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
+-		}
++		error = ufs_unit_ready();
+ 	}
+ 	if (!error) {
+ 		error = ufs_find_partition(want);
