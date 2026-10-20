@@ -188,3 +188,13 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
 - **Init line:** `arb=0x70010000` (**PMIC arbiter v7** confirmed), pon-apid 3, volup-apid 31; PON RT idle 0x10; GPIO6 RT 0x1 (high = released); mode/en 0x80 enabled, subtype 0x13. Volume-up GPIO accepted as an input.
 - **Presses (Sajid on the lock screen):** power → pon 0x90 (bit 7) → HID `0x30`; volume down → pon 0x50 (bit 6) → `0xea`; volume up → GPIO RT 0 → `0xe9`; Essential Key (TLMM 71 at 0xf147004) → `0x40` (Menu/Home). Each one logged `SWEET HID: key ... down/up (1 clients)` (backboardd's HID client). After a power press: `SWEET AKS: SpringBoard sel 26 arg0 2` (lock state change).
 - The `oem dmesg` zone's tail after our text is stale text from the previous boot (identical to the end of `oem-dmesg-ios1`). The ring didn't wrap this time.
+
+## 2026-10-20: touch run 1 (shim): rails ready, SE0 is GPI-DMA only
+
+- **Probe** `TOUCH=1` (`touch.c`), log `backup/oem-dmesg-touch1*.txt`. Stage A/B results:
+  - GCC QUP0 vote 0x48000900 with only S0 off (offmask 0x10); after voting bits 18-22 → 0x487c0900, all five clocks on. DFS enabled, level 0 = 0x1 (XO/1).
+  - **RSC id 0x00030200 → v3.0 layout**; config 0x800c8104: DRV2 8 TCS, ncpt 16. ACTIVE TCS 0-2 idle and empty.
+  - cmd-db v1, magic ok: **`ldob11` = VRM 0x40a00, `ldob22` = 0x42800**.
+  - TLMM: GPIO0/1 cfg 0x203 io 0x3 (ABL leaves them **outputs driving high**), GPIO2/3 inputs.
+  - QUP hw 0x300d0000. **SE0 firmware protocol 1 (SPI), FIFOs 32 words, but `GENI_IF_DISABLE_RO = 1`**: the FIFO interface is disabled, so SE0 only does GPI DMA (gpi_dma0 at 0xa00000, GPII 0 static, behind SMMU SID 0x576). The probe stopped there; no rail vote was sent.
+- **Next run:** bit-banged SPI on GPIO 0-3 (MISO in, MOSI/CLK/CS out). Pin order: MISO input before the votes; CS high, CLK and MOSI low, then output enable only after the `ldob11` vote. Log the cost of one 93-byte frame, and arm GPIO19's TLMM latch (falling edge, raw status, no routing) to see whether it tracks touches. Stop on any vote failure. GPI DMA comes later.

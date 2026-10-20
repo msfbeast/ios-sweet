@@ -9,6 +9,8 @@
  *      high, 200 ms
  *   D  FocalTech chip id (0xA3/0x9F) and firmware version (0xA6): reads only
  *   E  60 s of 10 ms report polling: a dot under every finger, log lines
+ * SE0 turned out to be GPI-DMA only (GENI_IF_DISABLE_RO = 1, touch run 1),
+ * so SPI is bit-banged on GPIOs 0..3 (MISO, MOSI, CLK, CS) as plain GPIOs.
  * Facts and sources: asteroids/research-touch.md. The touch IC is never
  * written to (no 0xA5 sleep, no firmware upgrade).
  */
@@ -89,6 +91,7 @@ static const uint32_t gcc_halt[5] = { 0x23018, 0x23008, 0x23000, 0x23004, 0x1800
 static uint32_t tcs_wait, tcs_control, tcs_status, tcs_enable, tcs_cmd_stride;
 static uint32_t tcs_msgid, tcs_addr, tcs_data, tcs_cmd_status, rsc_ncpt;
 static uint32_t fifo_depth;
+static int use_bb;		/* SPI by bit-banging GPIO 0..3 */
 
 /* ---- guarded MMIO with logging of the first abort ---- */
 
@@ -297,7 +300,7 @@ static int se_init(void)
 	con_hex2("QUP", "hwver=", hw, "status=", rd(SE + SE_STATUS));
 	con_hex2("SE0", "fw=", fw, "ifdis=", dis);
 	con_hex2(" fifo", "tx=", txd, "rx=", rxd);
-	if (((fw >> 8) & 0xff) != 1 || (dis & 1) || ((p0 >> 24) & 0x3f) != 32 || !txd || !rxd) {
+	if (((fw >> 8) & 0xff) != 1 || ((p0 >> 24) & 0x3f) != 32 || !txd || !rxd) {
 		con_str("SE0", "not an SPI FIFO SE, stop");
 		return -1;
 	}
@@ -341,9 +344,46 @@ static int se_init(void)
 	return 0;
 }
 
+/*
+ * Bit-banged SPI mode 0, MSB first: MOSI changes while CLK is low, MISO is
+ * sampled with CLK high. The FocalTech part accepts any clock up to 12 MHz;
+ * register access latency sets the actual rate.
+ */
+#define BB_MISO		TLMM_GPIO(0)
+#define BB_MOSI		TLMM_GPIO(1)
+#define BB_CLK		TLMM_GPIO(2)
+#define BB_CS		TLMM_GPIO(3)
+#define BB_OUT_CFG	0x280		/* func 0 (gpio), 6 mA, no pull, OE */
+
+static int bb_xfer(const uint8_t *tx, uint8_t *rx, uint32_t n)
+{
+	volatile uint32_t *mosi = (volatile uint32_t *)(BB_MOSI + 4);
+	volatile uint32_t *clk = (volatile uint32_t *)(BB_CLK + 4);
+	volatile uint32_t *cs = (volatile uint32_t *)(BB_CS + 4);
+	volatile uint32_t *miso = (volatile uint32_t *)(BB_MISO + 4);
+
+	*cs = 0;
+	for (uint32_t i = 0; i < n; i++) {
+		uint8_t out = tx[i], in = 0;
+		for (int b = 7; b >= 0; b--) {
+			*mosi = ((out >> b) & 1) << 1;
+			*clk = 2;
+			in = (uint8_t)(in << 1 | (*miso & 1));
+			*clk = 0;
+		}
+		rx[i] = in;
+	}
+	*cs = 2;
+	__asm__ volatile("dsb sy" ::: "memory");
+	delay_us(150);			/* CS-high gap, as the Linux driver */
+	return 0;
+}
+
 /* One full-duplex frame; CS low for the whole command (no CS_TOGGLE). */
 static int spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t n)
 {
+	if (use_bb)
+		return bb_xfer(tx, rx, n);
 	uint32_t ti = 0, ri = 0;
 	uint64_t t_end = now() + 192000;	/* 10 ms at 19.2 MHz */
 
@@ -448,11 +488,22 @@ static void touch_live(void)
 	uint8_t d[84];
 	int logged = 0, fails = 0, reports = 0;
 	uint8_t last_n = 0xff;
+	uintptr_t icfg = TLMM_GPIO(19) + 8, ist = TLMM_GPIO(19) + 0xc;
+
+	/* INT latch: falling edge, raw status on, no interrupt routing. */
+	wr(icfg, (1U << 4) | (2U << 2) | (1U << 1));
+	wr(ist, 0);
+	uint64_t t0 = now();
+	ft_read(0x01, d, 84);
+	con_hex2("FRAME", "us=", (uint32_t)((now() - t0) * 10 / 192), "icfg=", rd(icfg));
 
 	stage = "touch live";
 	con_str("TOUCH", "live 60 s: draw on the screen");
 	for (int tick = 0; tick < 6000; tick++) {
 		delay_ms(10);
+		uint32_t latch = rd(ist) & 1;
+		if (latch)
+			wr(ist, 0);
 		if (ft_read(0x01, d, 84)) {
 			if (fails++ == 20)
 				con_str("TOUCH", "20 report reads failed");
@@ -480,7 +531,7 @@ static void touch_live(void)
 				dot((int)x, (int)y, colors[id]);
 			if (logged < 60 && (n != last_n || flag != 2)) {
 				logged++;
-				con_hex2("T", "id/flag=", id << 8 | flag, "x/y=", x << 16 | y);
+				con_hex2("T", "id/fl/la=", id << 8 | flag << 4 | latch, "x/y=", x << 16 | y);
 			}
 		}
 		last_n = n;
@@ -515,10 +566,20 @@ void touch_probe(void)
 		con_str("GCC", "QUP0 SE0 clock not XO/1 on, stop");
 		return;
 	}
-	if (se_init())
-		return;
-	for (int p = 0; p < 4; p++)
-		wr(TLMM_GPIO(p), 0x84);			/* func 1 (QUP), 6 mA, no pull */
+	use_bb = (rd(SE + SE_IF_DIS) & 1) != 0;
+	if (use_bb) {
+		con_str("SE0", "GPI-DMA only: bit-bang SPI on GPIO 0-3");
+		/* ABL leaves GPIO0/1 driving high: MISO must not fight the IC. */
+		wr(BB_MISO, 0x80);			/* gpio, input, no pull */
+		wr(BB_MOSI, 0x80);			/* inputs until vddio is up */
+		wr(BB_CLK, 0x80);
+		wr(BB_CS, 0x80);
+	} else {
+		if (se_init())
+			return;
+		for (int p = 0; p < 4; p++)
+			wr(TLMM_GPIO(p), 0x84);		/* func 1 (QUP), 6 mA, no pull */
+	}
 	wr(TLMM_GPIO(19), 0xc3);			/* gpio, 8 mA, pull-up, input */
 	wr(TLMM_GPIO(20) + 4, 0);			/* reset low ... */
 	wr(TLMM_GPIO(20), 0x2c3);			/* ... then output, 8 mA, pull-up */
@@ -527,7 +588,17 @@ void touch_probe(void)
 	stage = "touch C";
 	delay_ms(2);
 	if (rpmh_vote("ldob22", 3300) || rpmh_vote("ldob11", 1800))
-		return;
+		return;				/* stop on any vote failure, no retry */
+	if (use_bb) {
+		/* vddio is up: idle levels first, then output enable. */
+		wr(BB_CS + 4, 2);
+		wr(BB_CS, BB_OUT_CFG);
+		wr(BB_CLK + 4, 0);
+		wr(BB_CLK, BB_OUT_CFG);
+		wr(BB_MOSI + 4, 0);
+		wr(BB_MOSI, BB_OUT_CFG);
+		show_pins();
+	}
 	delay_ms(10);
 	wr(TLMM_GPIO(20) + 4, 2);			/* reset high */
 	delay_ms(200);
