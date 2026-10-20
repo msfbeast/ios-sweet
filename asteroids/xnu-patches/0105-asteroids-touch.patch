@@ -1,0 +1,475 @@
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 03defe6..935d601 100644
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -5,7 +5,8 @@
+  * No firmware/config upload or direct PMIC writes. Only IC data write:
+  * zero to GT9896's event status after reading a report. See touch2/report.md.
+  */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <pexpert/arm64/board_config.h>
++#if defined(ARM64_BOARD_CONFIG_SWEET) && !defined(SWEET_ASTEROIDS)
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/errno.h>
+@@ -657,4 +658,459 @@ sweet_touch_init(void)
+ 		printf("SWEET TOUCH: kernel_thread_start failed %d\n", kr);
+ 	}
+ }
+-#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* ARM64_BOARD_CONFIG_SWEET && !SWEET_ASTEROIDS */
++
++#if defined(SWEET_ASTEROIDS)
++/*
++ * Nothing Phone (3a) touch: FocalTech FT3683G/FT3681 on QUP0 SE0's pins.
++ * SE0 is GPI-DMA only (GENI_IF_DISABLE_RO = 1), so SPI mode 0 is bit-banged
++ * on TLMM GPIO 0..3 (MISO, MOSI, CLK, CS), proven in the asteroids shim
++ * (touch.c, touch run 2). Power: RPMh v3.0 ACTIVE votes for ldob22 3.3 V
++ * and ldob11 1.8 V on the apps RSC DRV2. Reset TLMM 20, INT TLMM 19
++ * (falling-edge latch used as a read hint). Reads only from the IC: no
++ * sleep command (0xA5), no firmware upgrade. Sources: research-touch.md.
++ */
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++void sweet_touch_init(void);
++
++#define AT_TLMM_PA      0x0f100000u     /* TLMM 0xf000000 + REG_BASE 0x100000 */
++#define AT_TLMM_SIZE    0x15000u        /* GPIO 0..20 */
++#define AT_RSC_PA       0x17a20000u     /* apps RSC DRV2 */
++#define AT_TCS_PA       0x17a20d00u
++#define AT_TCS_SIZE     0x3000u
++#define AT_TCS_STRIDE   0x2a0u
++#define AT_TCS_ACTIVE   3u
++#define AT_CMDDB_PA     0x81c60000u
++#define AT_CMDDB_SIZE   0x20000u
++#define AT_GPIO(n)      ((uint32_t)(n) * 0x1000u)
++#define AT_MISO         0
++#define AT_MOSI         1
++#define AT_CLK          2
++#define AT_CS           3
++#define AT_INT          19
++#define AT_RESET        20
++#define AT_MAX          10u
++#define AT_W            1080
++#define AT_H            2392
++
++static struct {
++	vm_offset_t tlmm, rsc, tcs, db;
++	uint32_t wait, control, status, enable, stride, msgid, addr, data, cmdst;
++	bool started;
++	uint32_t active;
++	int x[AT_MAX], y[AT_MAX];
++	uint8_t tx[96], rx[96];
++} at;
++static int at_sleep_chan;
++
++static uint32_t
++at_rd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++at_wr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static void
++at_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&at_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* ---- RPMh (v3.0 layout; v2 kept for completeness) ---- */
++
++static uint32_t
++at_db16(uint32_t off)
++{
++	return (at_rd(at.db, off & ~3u) >> (8u * (off & 3u))) & 0xffffu;
++}
++
++static uint32_t
++at_cmddb(const char *res)
++{
++	uint32_t key[2] = {0, 0}, found = 0, matches = 0;
++	for (unsigned i = 0; i < 8 && res[i]; ++i) {
++		key[i / 4] |= (uint32_t)(uint8_t)res[i] << (8u * (i % 4));
++	}
++	for (unsigned i = 0; i < 8; ++i) {
++		uint32_t h = 8u + 16u * i, slave = at_db16(h);
++		if (!slave) {
++			break;
++		}
++		uint32_t entries = 144u + at_db16(h + 2), count = at_db16(h + 6);
++		if ((entries & 3u) || entries + count * 24u > AT_CMDDB_SIZE) {
++			return 0;
++		}
++		for (uint32_t j = 0; j < count; ++j) {
++			uint32_t e = entries + 24u * j;
++			if (at_rd(at.db, e) == key[0] && at_rd(at.db, e + 4) == key[1]) {
++				found = at_rd(at.db, e + 16);
++				++matches;
++			}
++		}
++	}
++	return (matches == 1 && (found >> 16) == 4 && !(found & 15u)) ? found : 0;
++}
++
++static bool
++at_sync(uint32_t off, uint32_t v)
++{
++	at_wr(at.tcs, off, v);
++	for (unsigned i = 0; i < 1000; ++i) {
++		if (at_rd(at.tcs, off) == v) {
++			return true;
++		}
++		delay(1);
++	}
++	printf("SWEET TOUCH: RPMh readback timeout off=%#x\n", off);
++	return false;
++}
++
++static bool
++at_tcs_free(unsigned t)
++{
++	uint32_t b = t * AT_TCS_STRIDE, idle = at_rd(at.tcs, b + at.status);
++	return idle != 0 && idle != 0xffffffffu && at_rd(at.tcs, b + at.control) == 0 &&
++	       at_rd(at.tcs, b + at.enable) == 0 && at_rd(at.tcs, b + at.wait) == 0 &&
++	       !(at_rd(at.tcs, 0x04) & (1u << t));
++}
++
++static int
++at_vote(const char *res, uint32_t mv)
++{
++	uint32_t addr = at_cmddb(res);
++	unsigned t;
++	if (!addr) {
++		printf("SWEET TOUCH: cmd-db has no unique VRM %s\n", res);
++		return ENODEV;
++	}
++	for (t = 0; t < AT_TCS_ACTIVE && !at_tcs_free(t); ++t) {
++	}
++	if (t == AT_TCS_ACTIVE) {
++		printf("SWEET TOUCH: no free ACTIVE TCS for %s\n", res);
++		return EBUSY;
++	}
++	uint32_t b = t * AT_TCS_STRIDE, bit = 1u << t, irq_en = at_rd(at.tcs, 0);
++	const uint32_t offs[3] = {0, 8, 4}, vals[3] = {mv, 7, 1}; /* voltage, HPM, enable last */
++	if (!at_sync(0, irq_en & ~bit)) {
++		return EIO;
++	}
++	for (unsigned c = 0; c < 3; ++c) {
++		uint32_t cmd = b + c * at.stride;
++		if (!at_sync(cmd + at.msgid, 8u | (1u << 8) | (1u << 16)) ||
++		    !at_sync(cmd + at.addr, addr + offs[c]) || !at_sync(cmd + at.data, vals[c])) {
++			return EIO;
++		}
++	}
++	if (!at_sync(b + at.wait, 7) || !at_sync(b + at.enable, 7) ||
++	    !at_sync(b + at.control, 0) || !at_sync(b + at.control, 1u << 16)) {
++		return EIO;
++	}
++	at_wr(at.tcs, b + at.control, (1u << 16) | (1u << 24));
++	bool done = false, progress = false;
++	uint32_t st0 = 0;
++	for (unsigned us = 0; us < 100000 && !done; ++us) {
++		bool complete = true;
++		uint32_t idle = at_rd(at.tcs, b + at.status);
++		for (unsigned c = 0; c < 3; ++c) {
++			uint32_t st = at_rd(at.tcs, b + at.cmdst + c * at.stride);
++			st0 = c ? st0 : st;
++			complete &= (st & 0x10100u) == 0x10100u;
++		}
++		progress |= idle == 0 || !complete;
++		done = idle && idle != 0xffffffffu && complete &&
++		    ((at_rd(at.tcs, 0x04) & bit) || progress);
++		if (!done) {
++			delay(1);
++		}
++	}
++	printf("SWEET TOUCH: %s %u mV vote %s (TCS%u st0=%#x)\n", res, mv, done ? "ok" : "TIMEOUT", t, st0);
++	if (!done) {
++		return ETIMEDOUT;       /* TCS left masked: no retry */
++	}
++	(void)at_sync(b + at.control, 1u << 16);
++	(void)at_sync(b + at.control, 0);
++	(void)at_sync(b + at.enable, 0);
++	(void)at_sync(b + at.wait, 0);
++	at_wr(at.tcs, 0x08, bit);
++	(void)at_sync(0, (at_rd(at.tcs, 0) & ~bit) | (irq_en & bit));
++	return 0;
++}
++
++/* ---- bit-banged SPI mode 0 + FocalTech SPI v2 frames ---- */
++
++static void
++at_spi(uint32_t n)
++{
++	volatile uint32_t *mosi = (volatile uint32_t *)(at.tlmm + AT_GPIO(AT_MOSI) + 4);
++	volatile uint32_t *clk = (volatile uint32_t *)(at.tlmm + AT_GPIO(AT_CLK) + 4);
++	volatile uint32_t *cs = (volatile uint32_t *)(at.tlmm + AT_GPIO(AT_CS) + 4);
++	volatile uint32_t *miso = (volatile uint32_t *)(at.tlmm + AT_GPIO(AT_MISO) + 4);
++	*cs = 0;
++	for (uint32_t i = 0; i < n; ++i) {
++		uint8_t out = at.tx[i], in = 0;
++		for (int b = 7; b >= 0; --b) {
++			*mosi = ((out >> b) & 1u) << 1;
++			*clk = 2;
++			in = (uint8_t)(in << 1 | (*miso & 1u));
++			*clk = 0;
++		}
++		at.rx[i] = in;
++	}
++	*cs = 2;
++	__asm__ volatile("dsb sy" ::: "memory");
++	delay(150);                     /* CS-high gap, as the Linux driver */
++}
++
++static uint16_t
++at_crc(const uint8_t *p, uint32_t n)
++{
++	uint16_t crc = 0xffff;
++	while (n--) {
++		crc ^= *p++;
++		for (int b = 0; b < 8; ++b) {
++			crc = (crc & 1u) ? (uint16_t)((crc >> 1) ^ 0x8408u) : (uint16_t)(crc >> 1);
++		}
++	}
++	return crc;
++}
++
++static int
++at_read(uint8_t reg, uint8_t *out, uint32_t len)
++{
++	uint32_t n = 7 + len + 2;
++	for (uint32_t i = 0; i < n; ++i) {
++		at.tx[i] = 0;
++	}
++	at.tx[0] = reg;
++	at.tx[1] = 0xa0;                /* read, CRC on */
++	at.tx[2] = (uint8_t)(len >> 8);
++	at.tx[3] = (uint8_t)len;
++	for (int tries = 0; tries < 3; ++tries) {
++		at_spi(n);
++		uint16_t want = (uint16_t)(at.rx[7 + len] | at.rx[8 + len] << 8);
++		if ((at.rx[3] & 0xa0) == 0 && want == at_crc(&at.rx[7], len)) {
++			for (uint32_t i = 0; i < len; ++i) {
++				out[i] = at.rx[7 + i];
++			}
++			return 0;
++		}
++	}
++	return EIO;
++}
++
++static void
++at_report(uint32_t mask, const int *x, const int *y)
++{
++	for (unsigned id = 0; id < AT_MAX; ++id) {
++		uint32_t bit = 1u << id;
++		if (mask & bit) {
++			if (!(at.active & bit) || x[id] != at.x[id] || y[id] != at.y[id]) {
++				sweet_hid_touch((int)id, 1, x[id], y[id]);
++			}
++			at.x[id] = x[id];
++			at.y[id] = y[id];
++		} else if (at.active & bit) {
++			sweet_hid_touch((int)id, 0, at.x[id], at.y[id]);
++		}
++	}
++	at.active = mask;
++}
++
++/* One report: 84 bytes from 0x01; event type 0 (6-byte) or 2 (8-byte v2). */
++static int
++at_poll(void)
++{
++	uint8_t d[84];
++	int x[AT_MAX] = {0}, y[AT_MAX] = {0};
++	uint32_t mask = 0;
++	int err = at_read(0x01, d, sizeof(d));
++	if (err) {
++		return err;
++	}
++	if (d[1] == 0xff && d[2] == 0xff && d[3] == 0xff && d[4] == 0xff) {
++		at_report(0, x, y);     /* firmware (re)initialised */
++		return 0;
++	}
++	uint8_t type = d[1] >> 4, n = d[1] & 0x0f;
++	if (type != 0 && type != 2) {
++		return 0;
++	}
++	for (unsigned i = 0; i < AT_MAX && (type != 2 || i < n); ++i) {
++		const uint8_t *r = type == 2 ? &d[4 + 8 * i] : &d[2 + 6 * i];
++		unsigned id = r[2] >> 4, flag = r[0] >> 6;
++		int px, py;
++		if (id >= AT_MAX) {
++			break;
++		}
++		if (type == 2) {
++			px = (int)((((r[0] & 0x0fu) << 12) | ((unsigned)r[1] << 4) | (r[4] >> 4)) / 16u);
++			py = (int)((((r[2] & 0x0fu) << 12) | ((unsigned)r[3] << 4) | (r[4] & 0x0fu)) / 16u);
++		} else {
++			px = (int)(((r[0] & 0x0fu) << 8) | r[1]);
++			py = (int)(((r[2] & 0x0fu) << 8) | r[3]);
++		}
++		if (flag == 1 || px >= AT_W || py >= AT_H) {
++			continue;               /* lift-off or out of range */
++		}
++		mask |= 1u << id;
++		x[id] = px;
++		y[id] = py;
++	}
++	at_report(mask, x, y);
++	return 0;
++}
++
++static void
++at_pin(unsigned n, uint32_t cfg)
++{
++	at_wr(at.tlmm, AT_GPIO(n), cfg);
++}
++
++static void
++at_thread(void *arg, wait_result_t result)
++{
++	unsigned delay_s = 20;
++	(void)arg;
++	(void)result;
++	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
++	printf("SWEET TOUCH: Phone (3a) FocalTech, starting in %u s\n", delay_s);
++	at_wait(delay_s * 1000u);
++	at.tlmm = ml_io_map(AT_TLMM_PA, AT_TLMM_SIZE);
++	at.rsc = ml_io_map(AT_RSC_PA, 0x100);
++	at.tcs = ml_io_map(AT_TCS_PA, AT_TCS_SIZE);
++	at.db = ml_io_map(AT_CMDDB_PA, AT_CMDDB_SIZE);
++	if (!at.tlmm || !at.rsc || !at.tcs || !at.db) {
++		printf("SWEET TOUCH: MMIO mapping failed\n");
++		goto out;
++	}
++	uint32_t id = at_rd(at.rsc, 0), config = at_rd(at.rsc, 0x0c);
++	if (((id >> 16) & 0xffu) >= 3) {
++		at.wait = 0x20; at.control = 0x24; at.status = 0x28; at.enable = 0x2c;
++		at.stride = 0x18; at.msgid = 0x34; at.addr = 0x38; at.data = 0x3c; at.cmdst = 0x40;
++	} else {
++		at.wait = 0x10; at.control = 0x14; at.status = 0x18; at.enable = 0x1c;
++		at.stride = 0x14; at.msgid = 0x30; at.addr = 0x34; at.data = 0x38; at.cmdst = 0x3c;
++	}
++	printf("SWEET TOUCH: RSC id=%#x config=%#x cmd-db magic=%#x\n", id, config, at_rd(at.db, 4));
++	if (at_rd(at.db, 4) != 0x0c0330dbu || ((config >> 12) & 0x3fu) < AT_TCS_ACTIVE) {
++		goto out;
++	}
++
++	/* ABL leaves GPIO0/1 driving high: everything input until vddio is up. */
++	for (unsigned p = AT_MISO; p <= AT_CS; ++p) {
++		at_pin(p, 0x80);        /* gpio, input, no pull */
++	}
++	at_pin(AT_INT, 0xc3);           /* gpio, 8 mA, pull-up, input */
++	at_wr(at.tlmm, AT_GPIO(AT_RESET) + 4, 0);
++	at_pin(AT_RESET, 0x2c3);        /* output low, 8 mA, pull-up */
++	at_wait(2);
++	if (at_vote("ldob22", 3300) || at_vote("ldob11", 1800)) {
++		goto out;
++	}
++	at_wr(at.tlmm, AT_GPIO(AT_CS) + 4, 2);  /* idle levels, then output enable */
++	at_pin(AT_CS, 0x280);
++	at_wr(at.tlmm, AT_GPIO(AT_CLK) + 4, 0);
++	at_pin(AT_CLK, 0x280);
++	at_wr(at.tlmm, AT_GPIO(AT_MOSI) + 4, 0);
++	at_pin(AT_MOSI, 0x280);
++	at_wait(10);
++	at_wr(at.tlmm, AT_GPIO(AT_RESET) + 4, 2);       /* reset high */
++	at_wait(200);
++
++	uint8_t idh = 0, idl = 0, fw = 0;
++	bool ok = false;
++	for (int i = 0; i < 5 && !ok; ++i) {
++		ok = !at_read(0xa3, &idh, 1) && !at_read(0x9f, &idl, 1) && idh == 0x56 &&
++		    (idl == 0x72 || idl == 0xb3 || idl == 0x62);
++		if (!ok) {
++			at_wait(200);
++		}
++	}
++	(void)at_read(0xa6, &fw, 1);
++	printf("SWEET TOUCH: FocalTech id %02x:%02x fw %02x %s\n", idh, idl, fw, ok ? "ok" : "NOT FOUND");
++	if (!ok) {
++		goto out;
++	}
++
++	/* INT latch: falling edge, raw status, no interrupt routing. */
++	at_wr(at.tlmm, AT_GPIO(AT_INT) + 8, (1u << 4) | (2u << 2) | (1u << 1));
++	at_wr(at.tlmm, AT_GPIO(AT_INT) + 0xc, 0);
++	uint64_t t0 = mach_absolute_time(), ns;
++	(void)at_poll();
++	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++	printf("SWEET TOUCH: one 93-byte frame takes %llu us; polling (10 ms when down/latched, else 100 ms)\n",
++	    ns / 1000);
++
++	unsigned errors = 0, ticks = 0, latched = 0, reads = 0;
++	for (;;) {
++		uint32_t latch = at_rd(at.tlmm, AT_GPIO(AT_INT) + 0xc) & 1u;
++		if (latch) {
++			at_wr(at.tlmm, AT_GPIO(AT_INT) + 0xc, 0);
++			++latched;
++		}
++		if (latch || at.active || (++ticks % 10u) == 0) {
++			++reads;
++			if (at_poll()) {
++				if ((errors++ % 100u) == 0) {
++					printf("SWEET TOUCH: report read error (%u)\n", errors);
++				}
++				if (errors == 10) {
++					at_report(0, at.x, at.y);
++				}
++			} else {
++				errors = 0;
++			}
++		}
++		if (reads == 2000) {
++			printf("SWEET TOUCH: 2000 reads, %u with the INT latch set\n", latched);
++		}
++		at_wait(10);
++	}
++out:
++	printf("SWEET TOUCH: stopped\n");
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sweet_touch_init(void)
++{
++	int enabled = 1;
++	thread_t thread;
++	if (at.started) {
++		return;
++	}
++	at.started = true;
++	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
++	if (!enabled) {
++		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
++		return;
++	}
++	if (kernel_thread_start(at_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	}
++}
++#endif /* SWEET_ASTEROIDS */

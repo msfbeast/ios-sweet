@@ -89,6 +89,7 @@ jobs:
           grep -q 'ufs_unit_ready' dxb/xnu/bsd/dev/sweet_ufs.c
           grep -q 'KEYS_ESS_PA' dxb/xnu/bsd/dev/sweet_keys.c
           grep -q 'RAMOOPS_SHOW' dxb/xnu/osfmk/arm64/sweet_early.c
+          grep -q 'at_vote' dxb/xnu/bsd/dev/sweet_touch.c
 
       - name: Package build tree for local compiles
         if: always()

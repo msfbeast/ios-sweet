@@ -205,3 +205,14 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
 - The `FT id`/`FRAME`/`TOUCH live` lines fell below the 49 screen rows, but **two fingers drew continuous trails (red id 0, green id 1) across the whole panel**, so: rails up, reset released, FocalTech id accepted, SPI v2 frames with CRC parsed, the coordinate format is right, and both axes are right.
 - The `oem dmesg` after it was a **recovery-mode Linux boot** (`First stage mount skipped (recovery mode)`): the phone went through OrangeFox on the way back to fastboot, and that boot's pstore overwrote the probe log. Frame cost and INT latch behaviour are not known yet. To check: why recovery was booted (key combo or a reset), and that the iOS root on userdata is intact.
 - **Next:** patch 0105, the XNU touch driver for SWEET_ASTEROIDS: GCC QUP0 vote is not needed for bit-banging, so only the RPMh v3 votes, TLMM pins/reset, the bit-banged FocalTech SPI v2 and the polling thread feeding `sweet_hid_touch`.
+
+## 2026-10-20: patch 0105, XNU touch for the 3a
+
+- **`bsd/dev/sweet_touch.c`:** sweet's driver is now `#if !defined(SWEET_ASTEROIDS)`, and an asteroids driver is added, ported from the working shim probe:
+  - mapped TLMM 0xf100000 (GPIO 0-20), RSC DRV2, TCS, cmd-db;
+  - RSC layout chosen by major version (v3 on the 3a);
+  - pins input first, then `ldob22` 3300 mV + `ldob11` 1800 mV ACTIVE votes (stop on failure), then CS/CLK/MOSI outputs, reset high, 200 ms;
+  - FocalTech id 0xA3/0x9F (0x56:0x72/0xb3/0x62) and fw 0xA6;
+  - bit-banged SPI v2 frames with CRC16/MCRF4XX;
+  - reports type 0/2 → `sweet_hid_touch` through the same `touch_report` model as sweet.
+- **Polling:** every 10 ms while a finger is down or the GPIO19 falling-edge latch is set, otherwise every 100 ms. Logs the cost of one frame and, after 2000 reads, how many had the latch set. Starts after `sweettouchdelay` (default 20 s).
