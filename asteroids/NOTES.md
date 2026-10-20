@@ -259,3 +259,10 @@ Port of ios-sweet to the Nothing Phone (3a) (`Asteroids`, A059, SM7635 "Volcano"
 - **Change:** `asteroids-root-tweaks.py` now keeps both jobs (always rebuilt from `launchd.plist.asteroids-orig`) with `KeepAlive=false` and `RunAtLoad=false`: no automatic start or relaunch loop, but launch on demand still works.
 - **Second hang (jobs present, on demand only):** the same SpringBoard t0 stack (LaunchServices lock in `CCSModuleRepository` init), slide 0x223d0000, in every sample from 917 s to 1517 s. So the removed jobs were **not** the cause. On-demand launching also didn't stop the loops: bluetoothd 56 and fairplayd.H2 49 execs in the captured window.
 - **Suspect now:** the post-flash LaunchServices rebuild with `cpus=8`. The very first iOS boot after a flash was `cpus=1` and reached the lock screen; the working 8-core boot was on an image whose database was already built. Test: kernel 8 with `cpus=1` (`asteroids-xnu8-cpu1-boot.img`, `02ddb7d7...`) on the same freshly flashed image.
+
+## 2026-10-20: the hang only happens on the first 8-core boot after a flash
+
+- **cpus=1** (`asteroids-xnu8-cpu1-boot.img`) on the same freshly flashed image: reached the **lock screen** (Sajid). Log `backup/oem-dmesg-cpu1.txt`: UFS root and launchd under 1 s after the kernel's first line (patch 0107 holds on one core too).
+- **Then cpus=8** (`asteroids-xnu8-boot.img`, `92d45c1e...`) on that image: **works fine** (Sajid). The 8-core hang only happens while the post-flash LaunchServices rebuild runs; once one core has finished it, later 8-core boots are normal.
+- **Rule for now:** the first boot after every `fastboot flash userdata` uses a `CPUS=1` image (unlock once, wait about a minute on the home screen); after that, the normal 8-core image. `update-root.sh` prints this.
+- **Open:** the real SMP bug (something in the rebuild's lock or wakeup path that is lost across cores: a missed IPI, timer or ulock wakeup). The loops are also still open: on-demand jobs still exec bluetoothd and fairplayd.H2 dozens of times per boot, so KeepAlive is not what relaunches them (clients asking for their Mach services are the likely trigger).

@@ -30,3 +30,4 @@ rm -f "${img%.img}.simg"
 img2simg "$img" "${img%.img}.simg" 4096
 ls -lh "${img%.img}.simg"
 echo "done: ${img%.img}.simg"
+echo "first boot after flashing: use a CPUS=1 image (8 cores hang in the post-flash LaunchServices rebuild), then the normal 8-core image"
