@@ -31,8 +31,9 @@ work=$(mktemp -d /tmp/mkiosroot.XXXXXX)
 devs=()
 mnts=()
 cleanup() {
-	for m in "${mnts[@]}"; do sudo umount "$m" 2>/dev/null || true; done
-	for d in "${devs[@]}"; do hdiutil detach -force "$d" >/dev/null 2>&1 || true; done
+	# ${a[@]+...}: macOS bash 3.2 treats an empty array as unset under set -u
+	for m in ${mnts[@]+"${mnts[@]}"}; do sudo umount "$m" 2>/dev/null || true; done
+	for d in ${devs[@]+"${devs[@]}"}; do hdiutil detach -force "$d" >/dev/null 2>&1 || true; done
 	rm -rf "$work"/*.dmg "$work"/extract
 	rmdir "$work"/* "$work" 2>/dev/null || echo "left $work in place" >&2
 }
@@ -77,7 +78,7 @@ echo "mounted: $osmnt $sysmnt $appmnt"
 # 3. The raw HFS+ volume (sparse file; no partition map).
 mkfile -n "$size" "$out"
 dev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$out" | awk 'NR==1{print $1}')
-devs=("$dev" "${devs[@]}")
+devs=("$dev" ${devs[@]+"${devs[@]}"})
 newfs_hfs -s -J -v iOSRoot "$dev"
 root="$work/root"
 mkdir "$root"
